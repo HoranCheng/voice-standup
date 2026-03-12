@@ -40,7 +40,10 @@ const SYSTEM_PROMPT = `你是产品负责人的早会助手。
 
 // ─── Main App ────────────────────────────────────────────────────────────────
 export default function App() {
-  const [view, setView] = useState('home');
+  // Detect Siri/autostart mode from URL param: ?autostart=1
+  const autostartMode = new URLSearchParams(window.location.search).get('autostart') === '1';
+
+  const [view, setView] = useState(autostartMode ? 'taptostart' : 'home');
   const [config, setConfig] = useState(loadConfig);
   const [products, setProducts] = useState(() => config.products || []);
   const [selectedProduct, setSelectedProduct] = useState(null);
@@ -64,6 +67,11 @@ export default function App() {
   const listeningRef = useRef(false);
   const wakeLockRef = useRef(null);
   const standupRef = useRef(null);
+
+  // Driving mode: continuous auto-listen + auto-send (no push-to-talk)
+  const drivingModeRef = useRef(false);
+  // Stable ref for handleUserMessage to avoid circular deps in startListening
+  const handleUserMessageRef = useRef(null);
 
   // Keep refs in sync
   useEffect(() => { messagesRef.current = messages; }, [messages]);
@@ -95,7 +103,14 @@ export default function App() {
     const rec = createRecognizer(config.lang, {
       onResult: ({ final: f, interim: i, isFinal }) => {
         setInterim(isFinal ? '' : i);
-        // Don't auto-send — user controls via button release
+
+        // Driving mode: auto-send when speech finalises — no button needed
+        if (isFinal && f.trim() && drivingModeRef.current) {
+          listeningRef.current = false;
+          setListening(false);
+          setInterim('');
+          handleUserMessageRef.current?.(f.trim());
+        }
       },
       onEnd: () => {
         // Auto-restart loop for continuous listening (uses ref, never stale)
@@ -166,24 +181,41 @@ export default function App() {
         clearInterval(timerRef.current);
         wakeLockRef.current?.release();
         wakeLockRef.current = null;
+        drivingModeRef.current = false;
       }
 
       // Speak response
       setSpeaking(true);
       await speak(reply, config.lang);
       setSpeaking(false);
+
+      // Driving mode: auto-restart listening after AI finishes speaking
+      if (drivingModeRef.current && !isEnd) {
+        startListening();
+      }
     } catch (e) {
       setError(e.message);
+      // Driving mode: retry listening even after error
+      if (drivingModeRef.current) {
+        startListening();
+      }
     } finally {
       setLoading(false);
     }
-  }, [config.lang]);
+  }, [config.lang, startListening]);
+
+  // Keep handleUserMessageRef in sync (avoids stale closure in startListening)
+  useEffect(() => {
+    handleUserMessageRef.current = handleUserMessage;
+  }, [handleUserMessage]);
 
   // ─── Start meeting ──────────────────────────────────────────────────────
-  const startMeeting = useCallback(async (product) => {
+  // driving: true → enables auto-listen/auto-send (Siri/hands-free mode)
+  const startMeeting = useCallback(async (product, { driving = false } = {}) => {
     // Unlock iOS audio SYNCHRONOUSLY inside this gesture handler
     unlockAudio();
 
+    drivingModeRef.current = driving;
     setSelectedProduct(product);
     setMessages([]);
     setElapsed(0);
@@ -217,13 +249,17 @@ export default function App() {
       { role: 'assistant', content: greeting },
     ]);
 
-    // Speak greeting
+    // Speak greeting, then auto-start listening in driving mode
     setSpeaking(true);
     await speak(greeting, config.lang);
     setSpeaking(false);
+
+    if (driving) {
+      startListening();
+    }
   }, [config, startListening]);
 
-  // ─── Push-to-talk handlers (iOS compatible) ─────────────────────────────
+  // ─── Push-to-talk handlers (manual mode only) ───────────────────────────
   const handlePushStart = useCallback(() => {
     stopSpeaking(); // Interrupt AI if it's talking
     startListening();
@@ -238,6 +274,7 @@ export default function App() {
 
   // ─── End meeting manually ───────────────────────────────────────────────
   const endMeeting = useCallback(() => {
+    drivingModeRef.current = false;
     const transcript = stopListening();
     stopSpeaking();
     handleUserMessage(transcript ? transcript + ' 结束会议' : '结束会议，请整理指导意见。');
@@ -274,6 +311,66 @@ export default function App() {
       padding: 'env(safe-area-inset-top) 16px env(safe-area-inset-bottom)',
       display: 'flex', flexDirection: 'column',
     }}>
+
+      {/* ─── Tap-to-Start (Siri / ?autostart=1 entry point) ─── */}
+      {view === 'taptostart' && (
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', gap: 24 }}>
+          {!isSTTSupported() ? (
+            <div style={{
+              padding: '12px 16px', borderRadius: 12, background: 'rgba(239,68,68,0.15)',
+              color: T.red, fontSize: 13, maxWidth: 300, textAlign: 'center',
+            }}>
+              ⚠️ 此浏览器不支持语音识别，请使用 Safari
+            </div>
+          ) : products.length === 0 ? (
+            <>
+              <div style={{ fontSize: 48 }}>⚙️</div>
+              <div style={{ fontSize: 18, fontWeight: 700 }}>还没有配置产品</div>
+              <button onClick={() => setView('settings')} style={btnStyle(T.acc)}>去设置</button>
+            </>
+          ) : products.length === 1 ? (
+            // Single product — one big tap area, start immediately
+            <div
+              onClick={() => startMeeting(products[0], { driving: true })}
+              style={{
+                display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 20,
+                padding: '60px 40px', borderRadius: 32,
+                border: `2px solid ${T.acc}`, background: T.accDim,
+                cursor: 'pointer', WebkitTapHighlightColor: 'transparent',
+                textAlign: 'center',
+              }}
+            >
+              <div style={{ fontSize: 72 }}>🎙</div>
+              <div style={{ fontSize: 22, fontWeight: 800 }}>点击开始</div>
+              <div style={{ fontSize: 15, color: T.tx2 }}>{products[0].name}</div>
+              <div style={{ fontSize: 12, color: T.tx3, marginTop: 4 }}>之后全程免手触 · 驾车模式</div>
+            </div>
+          ) : (
+            // Multiple products — pick one
+            <>
+              <div style={{ fontSize: 48 }}>🎙</div>
+              <div style={{ fontSize: 20, fontWeight: 800 }}>选择产品开始站会</div>
+              <div style={{ fontSize: 12, color: T.tx3 }}>驾车模式 · 全程免手触</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12, width: '100%', maxWidth: 320 }}>
+                {products.map(p => (
+                  <button
+                    key={p.id}
+                    onClick={() => startMeeting(p, { driving: true })}
+                    style={{
+                      padding: '20px', borderRadius: 16, border: `1px solid ${T.bdr}`,
+                      background: T.card, color: T.tx, fontSize: 18, fontWeight: 700,
+                      cursor: 'pointer', fontFamily: F, textAlign: 'center',
+                    }}
+                  >
+                    {p.name}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
       {/* ─── Home ─── */}
       {view === 'home' && (
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', gap: 24, padding: '40px 0' }}>
@@ -332,6 +429,12 @@ export default function App() {
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <span style={{ width: 8, height: 8, borderRadius: '50%', background: T.red, animation: 'pulse 1.5s infinite' }} />
               <span style={{ fontSize: 13, fontWeight: 700 }}>早会进行中</span>
+              {drivingModeRef.current && (
+                <span style={{
+                  fontSize: 10, padding: '2px 8px', borderRadius: 6,
+                  background: 'rgba(245,158,11,0.2)', color: T.amber,
+                }}>🚗 驾车</span>
+              )}
             </div>
             <span style={{ fontSize: 13, color: T.tx3, fontFamily: 'monospace' }}>{formatTime(elapsed)}</span>
           </div>
@@ -367,41 +470,72 @@ export default function App() {
             <div ref={chatEndRef} />
           </div>
 
-          {/* Controls — Push-to-Talk (iOS compatible) */}
+          {/* Controls */}
           <div style={{
             display: 'flex', gap: 12, padding: '16px 0',
             borderTop: `1px solid ${T.bdr}`, justifyContent: 'center', alignItems: 'center',
           }}>
-            <button
-              onPointerDown={handlePushStart}
-              onPointerUp={handlePushEnd}
-              onPointerCancel={handlePushEnd}
-              disabled={loading}
-              style={{
-                width: 96, height: 96, borderRadius: '50%', border: 'none',
-                background: listening ? T.red : T.acc,
-                color: '#fff', fontSize: 32, cursor: loading ? 'wait' : 'pointer',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                transition: 'background 0.15s, transform 0.1s',
-                transform: listening ? 'scale(1.1)' : 'scale(1)',
-                WebkitTouchCallout: 'none',
-                WebkitUserSelect: 'none',
-                userSelect: 'none',
-              }}
-            >
-              {listening ? '🔴' : '🎙'}
-            </button>
-            <button onClick={endMeeting} style={{
-              padding: '0 24px', height: 56, borderRadius: 28,
-              border: `1px solid ${T.bdr}`, background: T.card,
-              color: T.tx, fontSize: 14, fontWeight: 700, cursor: 'pointer', fontFamily: F,
-            }}>
-              ⏹ 结束
-            </button>
+            {drivingModeRef.current ? (
+              // ── Driving mode: status indicator + end button only ──
+              <>
+                <div style={{
+                  flex: 1, padding: '20px 16px', borderRadius: 20,
+                  background: T.card, border: `1px solid ${T.bdr}`,
+                  display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6,
+                }}>
+                  <div style={{ fontSize: 28 }}>
+                    {speaking_ ? '🔊' : listening ? '🔴' : loading ? '⏳' : '⏸'}
+                  </div>
+                  <div style={{ fontSize: 12, color: T.tx3 }}>
+                    {speaking_ ? 'AI 说话中' : listening ? '正在聆听...' : loading ? '处理中' : '等待中'}
+                  </div>
+                </div>
+                <button onClick={endMeeting} style={{
+                  padding: '0 24px', height: 64, borderRadius: 20,
+                  border: `1px solid ${T.bdr}`, background: T.card,
+                  color: T.tx, fontSize: 14, fontWeight: 700, cursor: 'pointer', fontFamily: F,
+                }}>
+                  ⏹ 结束
+                </button>
+              </>
+            ) : (
+              // ── Manual mode: push-to-talk ──
+              <>
+                <button
+                  onPointerDown={handlePushStart}
+                  onPointerUp={handlePushEnd}
+                  onPointerCancel={handlePushEnd}
+                  disabled={loading}
+                  style={{
+                    width: 96, height: 96, borderRadius: '50%', border: 'none',
+                    background: listening ? T.red : T.acc,
+                    color: '#fff', fontSize: 32, cursor: loading ? 'wait' : 'pointer',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    transition: 'background 0.15s, transform 0.1s',
+                    transform: listening ? 'scale(1.1)' : 'scale(1)',
+                    WebkitTouchCallout: 'none',
+                    WebkitUserSelect: 'none',
+                    userSelect: 'none',
+                  }}
+                >
+                  {listening ? '🔴' : '🎙'}
+                </button>
+                <button onClick={endMeeting} style={{
+                  padding: '0 24px', height: 56, borderRadius: 28,
+                  border: `1px solid ${T.bdr}`, background: T.card,
+                  color: T.tx, fontSize: 14, fontWeight: 700, cursor: 'pointer', fontFamily: F,
+                }}>
+                  ⏹ 结束
+                </button>
+              </>
+            )}
           </div>
-          <div style={{ textAlign: 'center', paddingBottom: 8, fontSize: 11, color: T.tx3 }}>
-            {listening ? '正在听…松手发送' : loading ? 'AI 思考中' : '按住说话'}
-          </div>
+
+          {!drivingModeRef.current && (
+            <div style={{ textAlign: 'center', paddingBottom: 8, fontSize: 11, color: T.tx3 }}>
+              {listening ? '正在听…松手发送' : loading ? 'AI 思考中' : '按住说话'}
+            </div>
+          )}
         </div>
       )}
 
