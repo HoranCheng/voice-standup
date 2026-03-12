@@ -4,57 +4,64 @@
 
 ## 架构
 
-```
+```text
 [PWA] ←→ [Cloudflare Worker] ←→ [Claude API]
                    ↓
             [Discord Webhook]
 ```
 
+## 当前地址
+
+- GitHub: <https://github.com/HoranCheng/voice-standup>
+- Live: <https://horancheng.github.io/voice-standup/>
+
 ## 快速开始
 
-### 1. 部署 Worker
-
-```bash
-cd worker
-npm install
-
-# 设置环境变量（Cloudflare Dashboard 或 wrangler secret）
-wrangler secret put AUTH_TOKEN        # 随机生成一个
-wrangler secret put CLAUDE_API_KEY    # 你的 Claude API key
-wrangler secret put CLAUDE_MODEL      # 可选，默认 claude-sonnet-4-20250514
-wrangler secret put WEBHOOK_RECEIPT_RENAMER  # Discord webhook URL
-
-# 创建 KV namespace
-wrangler kv:namespace create STANDUPS
-# 把返回的 ID 填入 wrangler.toml
-
-wrangler deploy
-```
-
-### 2. 部署前端
+### 前端
 
 ```bash
 npm install
 npm run build
-npm run deploy  # 部署到 GitHub Pages
+npm run deploy
 ```
 
-### 3. 配置
+### Worker
 
-打开 PWA → 设置 →
+看 `DEPLOY.md`。
+
+最短路径：
+
+```bash
+cd worker
+npm install
+cp .env.example .env.local
+# 填好 .env.local
+chmod +x scripts/bootstrap.sh
+./scripts/bootstrap.sh
+```
+
+### App 配置
+
+打开 PWA → 设置：
+
 - Worker URL: `https://voice-standup.xxx.workers.dev`
-- Auth Token: 上面设置的 AUTH_TOKEN
-- 产品列表: JSON 格式
+- Auth Token: 部署时设置的 `AUTH_TOKEN`
+- Products JSON: 产品列表
 
 ## 技术栈
 
 - **前端**: React + Vite PWA
-- **语音识别**: Web Speech API (浏览器原生)
-- **语音合成**: SpeechSynthesis API (浏览器原生)
+- **语音识别**: Web Speech API
+- **语音合成**: SpeechSynthesis API
 - **AI**: Claude API (Anthropic)
 - **后端**: Cloudflare Worker + KV
 - **通知**: Discord Webhook
 
-## 成本
+## 成本说明
 
-全走 Claude Max 订阅 + 免费浏览器 API = $0 额外费用
+- 浏览器语音能力：免费
+- GitHub Pages：免费
+- Cloudflare Worker / KV：小规模可走免费层
+- **Claude 对话部分需要单独的 Anthropic API key，会产生 API 费用**
+
+所以它**不是**直接复用 Claude Max 订阅。
