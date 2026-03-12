@@ -1,20 +1,25 @@
 // ─── Speech-to-Text via Web Speech API ───────────────────────────────────────
 
-const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+function getSpeechRecognition() {
+  return typeof window !== 'undefined'
+    ? (window.SpeechRecognition || window.webkitSpeechRecognition)
+    : null;
+}
 
 export function isSTTSupported() {
-  return !!SpeechRecognition;
+  return !!getSpeechRecognition();
 }
 
 export function createRecognizer(lang = 'zh-CN', { onResult, onEnd, onError }) {
-  if (!SpeechRecognition) {
+  const SR = getSpeechRecognition();
+  if (!SR) {
     onError?.('Speech recognition not supported in this browser');
     return null;
   }
 
-  const rec = new SpeechRecognition();
+  const rec = new SR();
   rec.lang = lang;
-  rec.continuous = true;
+  rec.continuous = false; // iOS Safari ignores continuous:true; use push-to-talk model
   rec.interimResults = true;
   rec.maxAlternatives = 1;
 
@@ -35,7 +40,7 @@ export function createRecognizer(lang = 'zh-CN', { onResult, onEnd, onError }) {
   };
 
   rec.onerror = (e) => {
-    if (e.error === 'no-speech') return; // Ignore silence
+    if (e.error === 'no-speech' || e.error === 'aborted') return;
     onError?.(e.error);
   };
 

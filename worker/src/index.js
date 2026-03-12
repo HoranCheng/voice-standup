@@ -7,12 +7,16 @@
  *   POST /api/publish      — post directive to Discord webhook
  */
 
+const MAX_MESSAGES = 50;
+const MAX_CONTENT_LEN = 8000;
+const PRODUCT_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const origin = request.headers.get('Origin') || '';
 
-    // CORS
+    // CORS preflight
     if (request.method === 'OPTIONS') {
       return corsResponse(env, origin);
     }
@@ -29,7 +33,24 @@ export default {
 
       // ─── Chat (Claude API proxy) ────────────────────────────────────────
       if (path === '/api/chat' && request.method === 'POST') {
-        const { messages, system } = await request.json();
+        let body;
+        try { body = await request.json(); }
+        catch { return json({ error: 'Invalid JSON' }, 400, env, origin); }
+
+        if (!body || !Array.isArray(body.messages)) {
+          return json({ error: 'Invalid request: messages array required' }, 400, env, origin);
+        }
+
+        // Sanitize messages — cap count and length, validate roles
+        const safeMessages = body.messages.slice(0, MAX_MESSAGES).map(m => ({
+          role: ['user', 'assistant'].includes(m.role) ? m.role : 'user',
+          content: String(m.content ?? '').slice(0, MAX_CONTENT_LEN),
+        }));
+
+        // System prompt: use server-controlled default, allow client override only if env allows
+        const system = env.ALLOW_CLIENT_SYSTEM === 'true'
+          ? String(body.system || env.SYSTEM_PROMPT || '').slice(0, MAX_CONTENT_LEN)
+          : (env.SYSTEM_PROMPT || '');
 
         const res = await fetch('https://api.anthropic.com/v1/messages', {
           method: 'POST',
@@ -41,14 +62,15 @@ export default {
           body: JSON.stringify({
             model: env.CLAUDE_MODEL || 'claude-sonnet-4-20250514',
             max_tokens: 4096,
-            system: system || '',
-            messages,
+            system,
+            messages: safeMessages,
           }),
         });
 
         if (!res.ok) {
           const err = await res.text();
-          return json({ error: `Claude API error: ${res.status}`, detail: err }, 502, env, origin);
+          console.error('Claude API error:', res.status, err);
+          return json({ error: `AI service error (${res.status})` }, 502, env, origin);
         }
 
         const data = await res.json();
@@ -56,10 +78,14 @@ export default {
         return json({ response }, 200, env, origin);
       }
 
-      // ─── Get standup ────────────────────────────────────────────────────
+      // ─── Standup CRUD ───────────────────────────────────────────────────
       const standupMatch = path.match(/^\/api\/standup\/([a-zA-Z0-9_-]+)$/);
       if (standupMatch) {
         const productId = standupMatch[1];
+        if (!PRODUCT_ID_RE.test(productId)) {
+          return json({ error: 'Invalid productId' }, 400, env, origin);
+        }
+
         const today = new Date().toISOString().slice(0, 10);
         const key = `${productId}:${today}`;
 
@@ -70,8 +96,11 @@ export default {
         }
 
         if (request.method === 'PUT') {
-          const { content } = await request.json();
-          // Store with 48h TTL
+          let body;
+          try { body = await request.json(); }
+          catch { return json({ error: 'Invalid JSON' }, 400, env, origin); }
+
+          const content = String(body.content ?? '').slice(0, 20000);
           await env.STANDUPS.put(key, content, { expirationTtl: 172800 });
           return json({ ok: true, key }, 200, env, origin);
         }
@@ -79,27 +108,33 @@ export default {
 
       // ─── Publish to Discord ─────────────────────────────────────────────
       if (path === '/api/publish' && request.method === 'POST') {
-        const { productId, content } = await request.json();
+        let body;
+        try { body = await request.json(); }
+        catch { return json({ error: 'Invalid JSON' }, 400, env, origin); }
 
-        // Look up webhook URL from config
+        const { productId, content } = body;
+        if (!productId || !PRODUCT_ID_RE.test(productId)) {
+          return json({ error: 'Invalid productId' }, 400, env, origin);
+        }
+
         const webhookUrl = env[`WEBHOOK_${productId.toUpperCase().replace(/-/g, '_')}`];
         if (!webhookUrl) {
           return json({ error: `No webhook configured for product: ${productId}` }, 400, env, origin);
         }
 
+        const safeContent = String(content ?? '').slice(0, 2000);
         const discordRes = await fetch(webhookUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            content: content.length > 2000
-              ? content.slice(0, 1997) + '…'
-              : content,
+            content: safeContent,
             username: '早会助手',
           }),
         });
 
         if (!discordRes.ok) {
-          return json({ error: `Discord webhook error: ${discordRes.status}` }, 502, env, origin);
+          console.error('Discord webhook error:', discordRes.status);
+          return json({ error: `Publish failed (${discordRes.status})` }, 502, env, origin);
         }
 
         return json({ ok: true }, 200, env, origin);
@@ -107,7 +142,8 @@ export default {
 
       return json({ error: 'Not found' }, 404, env, origin);
     } catch (e) {
-      return json({ error: e.message }, 500, env, origin);
+      console.error('Worker error:', e);
+      return json({ error: 'Internal error' }, 500, env, origin);
     }
   },
 };

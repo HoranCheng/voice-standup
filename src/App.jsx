@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { loadConfig, saveConfig } from './config';
 import { isSTTSupported, createRecognizer } from './stt';
-import { speak, stopSpeaking, isSpeaking } from './tts';
+import { speak, stopSpeaking, unlockAudio } from './tts';
 import { chat, getStandup, publishDirective } from './api';
 
 // ─── Theme ───────────────────────────────────────────────────────────────────
@@ -13,8 +13,8 @@ const T = {
 };
 const F = '-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif';
 
-// ─── System prompt ───────────────────────────────────────────────────────────
-const SYSTEM_PROMPT = `你是产品负责人的早会助手。你已经有今天的产品早报作为上下文。
+// ─── System prompt (server-side copy in Worker; client-side used for display) ─
+const SYSTEM_PROMPT = `你是产品负责人的早会助手。
 
 你的职责：
 1. 简洁地向负责人汇报早报要点
@@ -40,7 +40,7 @@ const SYSTEM_PROMPT = `你是产品负责人的早会助手。你已经有今天
 
 // ─── Main App ────────────────────────────────────────────────────────────────
 export default function App() {
-  const [view, setView] = useState('home'); // home | meeting | summary | settings
+  const [view, setView] = useState('home');
   const [config, setConfig] = useState(loadConfig);
   const [products, setProducts] = useState(() => config.products || []);
   const [selectedProduct, setSelectedProduct] = useState(null);
@@ -56,13 +56,18 @@ export default function App() {
   const [publishing, setPublishing] = useState(false);
   const [published, setPublished] = useState(false);
 
+  // Refs for stable closure access
   const recRef = useRef(null);
   const timerRef = useRef(null);
   const messagesRef = useRef([]);
   const chatEndRef = useRef(null);
+  const listeningRef = useRef(false);
+  const wakeLockRef = useRef(null);
+  const standupRef = useRef(null);
 
-  // Keep ref in sync
+  // Keep refs in sync
   useEffect(() => { messagesRef.current = messages; }, [messages]);
+  useEffect(() => { standupRef.current = standup; }, [standup]);
 
   // Auto-scroll
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
@@ -75,8 +80,110 @@ export default function App() {
     return () => clearInterval(timerRef.current);
   }, [view]);
 
+  // Cleanup wake lock on unmount
+  useEffect(() => {
+    return () => {
+      wakeLockRef.current?.release();
+      wakeLockRef.current = null;
+    };
+  }, []);
+
+  // ─── STT helpers (stable refs, no stale closures) ───────────────────────
+  const startListening = useCallback(() => {
+    if (recRef.current) recRef.current.abort();
+
+    const rec = createRecognizer(config.lang, {
+      onResult: ({ final: f, interim: i, isFinal }) => {
+        setInterim(isFinal ? '' : i);
+        // Don't auto-send — user controls via button release
+      },
+      onEnd: () => {
+        // Auto-restart loop for continuous listening (uses ref, never stale)
+        if (listeningRef.current) {
+          try { rec.start(); } catch {}
+        }
+      },
+      onError: (err) => {
+        setError(`语音识别错误: ${err}`);
+      },
+    });
+
+    if (!rec) {
+      setError('此浏览器不支持语音识别，请使用 Chrome 或 Safari');
+      return;
+    }
+
+    recRef.current = rec;
+    listeningRef.current = true;
+    setListening(true);
+    rec.start();
+  }, [config.lang]);
+
+  const stopListening = useCallback(() => {
+    listeningRef.current = false;
+    setListening(false);
+    const transcript = recRef.current?.getTranscript()?.trim();
+    recRef.current?.stop();
+    return transcript || '';
+  }, []);
+
+  // ─── Send user message → AI → TTS ──────────────────────────────────────
+  const handleUserMessage = useCallback(async (text) => {
+    if (!text) return;
+
+    const userMsg = { role: 'user', content: text };
+    const updated = [...messagesRef.current, userMsg];
+    setMessages(updated);
+
+    // Check for end-of-meeting trigger
+    const endTriggers = ['结束会议', '结束', '就这样', '好了', '结束吧'];
+    const isEnd = endTriggers.some(t => text.includes(t));
+
+    setLoading(true);
+    try {
+      const chatMessages = updated
+        .filter(m => !m.hidden)
+        .map(m => ({ role: m.role, content: m.content }));
+
+      if (isEnd) {
+        chatMessages.push({
+          role: 'user',
+          content: '请根据我们的对话，整理出结构化的指导意见文稿。',
+        });
+      }
+
+      // Standup injected via system prompt only (not duplicated in messages)
+      const systemWithStandup = SYSTEM_PROMPT +
+        (standupRef.current ? `\n\n[今日早报]\n${standupRef.current}` : '');
+
+      const reply = await chat(chatMessages, systemWithStandup);
+      const aiMsg = { role: 'assistant', content: reply };
+      setMessages(prev => [...prev, aiMsg]);
+
+      if (isEnd) {
+        setSummary(reply);
+        setView('summary');
+        clearInterval(timerRef.current);
+        wakeLockRef.current?.release();
+        wakeLockRef.current = null;
+      }
+
+      // Speak response
+      setSpeaking(true);
+      await speak(reply, config.lang);
+      setSpeaking(false);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }, [config.lang]);
+
   // ─── Start meeting ──────────────────────────────────────────────────────
   const startMeeting = useCallback(async (product) => {
+    // Unlock iOS audio SYNCHRONOUSLY inside this gesture handler
+    unlockAudio();
+
     setSelectedProduct(product);
     setMessages([]);
     setElapsed(0);
@@ -84,6 +191,11 @@ export default function App() {
     setSummary('');
     setPublished(false);
     setView('meeting');
+
+    // Request wake lock (keep screen on while driving)
+    try {
+      wakeLockRef.current = await navigator.wakeLock?.request('screen');
+    } catch { /* not supported, fail silently */ }
 
     // Fetch standup
     let standupText = null;
@@ -101,12 +213,7 @@ export default function App() {
       ? `早上好。今天${product.name}有更新，我来给你简单说一下要点。`
       : `早上好。今天${product.name}暂时没有新的早报，有什么想讨论的？`;
 
-    const contextMsg = standupText
-      ? `[今日早报]\n${standupText}\n\n请简要总结给产品负责人听。`
-      : '目前没有今日早报。等用户提问。';
-
     setMessages([
-      { role: 'user', content: contextMsg, hidden: true },
       { role: 'assistant', content: greeting },
     ]);
 
@@ -114,99 +221,26 @@ export default function App() {
     setSpeaking(true);
     await speak(greeting, config.lang);
     setSpeaking(false);
+  }, [config, startListening]);
 
-    // Start listening
+  // ─── Push-to-talk handlers (iOS compatible) ─────────────────────────────
+  const handlePushStart = useCallback(() => {
+    stopSpeaking(); // Interrupt AI if it's talking
     startListening();
-  }, [config]);
+  }, [startListening]);
 
-  // ─── STT ────────────────────────────────────────────────────────────────
-  const startListening = useCallback(() => {
-    if (recRef.current) recRef.current.abort();
-    const rec = createRecognizer(config.lang, {
-      onResult: ({ final: f, interim: i, isFinal }) => {
-        setInterim(isFinal ? '' : i);
-        if (isFinal && f.trim()) {
-          handleUserMessage(f.trim());
-          rec.resetTranscript();
-        }
-      },
-      onEnd: () => {
-        // Auto-restart unless we stopped it
-        if (listening) {
-          try { rec.start(); } catch {}
-        }
-      },
-      onError: (err) => {
-        if (err !== 'aborted') setError(`语音识别错误: ${err}`);
-      },
-    });
-    recRef.current = rec;
-    rec.start();
-    setListening(true);
-  }, [config.lang, listening]);
-
-  const stopListening = useCallback(() => {
-    setListening(false);
-    recRef.current?.stop();
-  }, []);
-
-  // ─── Handle user message → AI → TTS ────────────────────────────────────
-  const handleUserMessage = useCallback(async (text) => {
-    // Pause listening while AI responds
-    recRef.current?.stop();
-    setListening(false);
-
-    const userMsg = { role: 'user', content: text };
-    const updated = [...messagesRef.current, userMsg];
-    setMessages(updated);
-
-    // Check for end-of-meeting trigger
-    const endTriggers = ['结束会议', '结束', '就这样', '好了', '结束吧'];
-    const isEnd = endTriggers.some(t => text.includes(t));
-
-    setLoading(true);
-    try {
-      const chatMessages = updated
-        .filter(m => !m.hidden || m.role === 'user')
-        .map(m => ({ role: m.role, content: m.content }));
-
-      if (isEnd) {
-        chatMessages.push({
-          role: 'user',
-          content: '请根据我们的对话，整理出结构化的指导意见文稿。',
-        });
-      }
-
-      const reply = await chat(chatMessages, SYSTEM_PROMPT + (standup ? `\n\n[早报内容]\n${standup}` : ''));
-      const aiMsg = { role: 'assistant', content: reply };
-      setMessages(prev => [...prev, aiMsg]);
-
-      if (isEnd) {
-        setSummary(reply);
-        setView('summary');
-        clearInterval(timerRef.current);
-      }
-
-      // Speak response
-      setSpeaking(true);
-      await speak(reply, config.lang);
-      setSpeaking(false);
-
-      // Resume listening if still in meeting
-      if (!isEnd) startListening();
-    } catch (e) {
-      setError(e.message);
-      startListening();
-    } finally {
-      setLoading(false);
+  const handlePushEnd = useCallback(() => {
+    const transcript = stopListening();
+    if (transcript) {
+      handleUserMessage(transcript);
     }
-  }, [standup, config.lang, startListening]);
+  }, [stopListening, handleUserMessage]);
 
   // ─── End meeting manually ───────────────────────────────────────────────
   const endMeeting = useCallback(() => {
-    stopListening();
+    const transcript = stopListening();
     stopSpeaking();
-    handleUserMessage('结束会议，请整理指导意见。');
+    handleUserMessage(transcript ? transcript + ' 结束会议' : '结束会议，请整理指导意见。');
   }, [stopListening, handleUserMessage]);
 
   // ─── Publish to Discord ─────────────────────────────────────────────────
@@ -236,7 +270,7 @@ export default function App() {
 
   return (
     <div style={{
-      minHeight: '100vh', background: T.bg, color: T.tx, fontFamily: F,
+      minHeight: '100dvh', background: T.bg, color: T.tx, fontFamily: F,
       padding: 'env(safe-area-inset-top) 16px env(safe-area-inset-bottom)',
       display: 'flex', flexDirection: 'column',
     }}>
@@ -246,6 +280,15 @@ export default function App() {
           <div style={{ fontSize: 48 }}>☀️</div>
           <div style={{ fontSize: 24, fontWeight: 800 }}>早会</div>
           <div style={{ fontSize: 14, color: T.tx3 }}>选择产品开始今天的早会</div>
+
+          {!isSTTSupported() && (
+            <div style={{
+              padding: '12px 16px', borderRadius: 12, background: 'rgba(239,68,68,0.15)',
+              color: T.red, fontSize: 13, maxWidth: 300, textAlign: 'center',
+            }}>
+              ⚠️ 此浏览器不支持语音识别，请使用 Chrome 或 Safari
+            </div>
+          )}
 
           {products.length === 0 ? (
             <div style={{ textAlign: 'center', padding: '20px 0' }}>
@@ -324,26 +367,40 @@ export default function App() {
             <div ref={chatEndRef} />
           </div>
 
-          {/* Controls */}
+          {/* Controls — Push-to-Talk (iOS compatible) */}
           <div style={{
             display: 'flex', gap: 12, padding: '16px 0',
-            borderTop: `1px solid ${T.bdr}`, justifyContent: 'center',
+            borderTop: `1px solid ${T.bdr}`, justifyContent: 'center', alignItems: 'center',
           }}>
-            <button onClick={() => listening ? stopListening() : startListening()} style={{
-              width: 64, height: 64, borderRadius: '50%', border: 'none',
-              background: listening ? T.red : T.sf,
-              color: '#fff', fontSize: 24, cursor: 'pointer',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-            }}>
-              {listening ? '🎙' : '🔇'}
+            <button
+              onPointerDown={handlePushStart}
+              onPointerUp={handlePushEnd}
+              onPointerCancel={handlePushEnd}
+              disabled={loading}
+              style={{
+                width: 96, height: 96, borderRadius: '50%', border: 'none',
+                background: listening ? T.red : T.acc,
+                color: '#fff', fontSize: 32, cursor: loading ? 'wait' : 'pointer',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                transition: 'background 0.15s, transform 0.1s',
+                transform: listening ? 'scale(1.1)' : 'scale(1)',
+                WebkitTouchCallout: 'none',
+                WebkitUserSelect: 'none',
+                userSelect: 'none',
+              }}
+            >
+              {listening ? '🔴' : '🎙'}
             </button>
             <button onClick={endMeeting} style={{
-              padding: '0 24px', height: 64, borderRadius: 32,
+              padding: '0 24px', height: 56, borderRadius: 28,
               border: `1px solid ${T.bdr}`, background: T.card,
               color: T.tx, fontSize: 14, fontWeight: 700, cursor: 'pointer', fontFamily: F,
             }}>
-              ⏹ 结束会议
+              ⏹ 结束
             </button>
+          </div>
+          <div style={{ textAlign: 'center', paddingBottom: 8, fontSize: 11, color: T.tx3 }}>
+            {listening ? '正在听…松手发送' : loading ? 'AI 思考中' : '按住说话'}
           </div>
         </div>
       )}
