@@ -106,6 +106,40 @@ export default {
         }
       }
 
+      // ─── Publish to Command Channel ──────────────────────────────────────
+      if (path === '/api/publish-command' && request.method === 'POST') {
+        let body;
+        try { body = await request.json(); }
+        catch { return json({ error: 'Invalid JSON' }, 400, env, origin); }
+
+        const { productId, content } = body;
+        if (!productId || !PRODUCT_ID_RE.test(productId)) {
+          return json({ error: 'Invalid productId' }, 400, env, origin);
+        }
+
+        const webhookUrl = env.WEBHOOK_COMMAND;
+        if (!webhookUrl) {
+          return json({ error: 'Command webhook not configured' }, 400, env, origin);
+        }
+
+        const safeContent = String(content ?? '').slice(0, 2000);
+        const discordRes = await fetch(webhookUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            content: `📋 **${productId} — 指导意见**\n\n${safeContent}`,
+            username: '早会助手',
+          }),
+        });
+
+        if (!discordRes.ok) {
+          console.error('Command webhook error:', discordRes.status);
+          return json({ error: `Command publish failed (${discordRes.status})` }, 502, env, origin);
+        }
+
+        return json({ ok: true }, 200, env, origin);
+      }
+
       // ─── Publish to Discord ─────────────────────────────────────────────
       if (path === '/api/publish' && request.method === 'POST') {
         let body;

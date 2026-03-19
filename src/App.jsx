@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback, Component } from 'reac
 import { loadConfig, saveConfig } from './config';
 import { isSTTSupported, createRecognizer } from './stt';
 import { speak, stopSpeaking, unlockAudio } from './tts';
-import { chat, getStandup, publishDirective } from './api';
+import { chat, getStandup, publishDirective, publishToCommand } from './api';
 
 // ─── Error Boundary ──────────────────────────────────────────────────────────
 class ErrorBoundary extends Component {
@@ -70,16 +70,18 @@ const F = '-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif'
 const SYSTEM_PROMPT = `你是产品负责人的早会助手。
 
 你的职责：
-1. 简洁地向负责人汇报早报要点
-2. 回答他关于进展的问题
-3. 当他给出指导意见时，确认并记录
-4. 当他说"结束会议"时，整理出结构化的指导意见文稿
+1. 如果有今日简报，第一轮回复时必须主动朗读简报要点（逐条念出关键信息，不要只说"有更新"）
+2. 简洁地向负责人汇报早报要点
+3. 回答他关于进展的问题
+4. 当他给出指导意见时，确认并记录
+5. 当他说"结束会议"时，整理出结构化的指导意见文稿
 
 沟通风格：
 - 简洁直接，不废话
 - 用中文
 - 像一个高效的技术总监在开站会
 - 需要他做决定的地方主动提出来
+- 朗读简报时按优先级排列，先说最重要的
 
 当用户说"结束会议"或类似表达时，输出以下格式的整理稿：
 """
@@ -323,19 +325,44 @@ function AppInner() {
     }
     setStandup(standupText);
 
-    // AI greeting
-    const greeting = standupText
-      ? `早上好。今天${product.name}有更新，我来给你简单说一下要点。`
-      : `早上好。今天${product.name}暂时没有新的早报，有什么想讨论的？`;
+    // AI greeting — if standup exists, use AI to read the briefing naturally
+    if (standupText) {
+      // Let AI generate a proper briefing readout via chat
+      const systemWithStandup = SYSTEM_PROMPT + `\n\n[今日简报]\n${standupText}`;
+      setMessages([{ role: 'assistant', content: '正在读取今日简报...' }]);
 
-    setMessages([
-      { role: 'assistant', content: greeting },
-    ]);
+      try {
+        setLoading(true);
+        const briefingReadout = await chat(
+          [{ role: 'user', content: `早上好，请给我读一下今天${product.name}的简报要点。` }],
+          systemWithStandup
+        );
+        setMessages([
+          { role: 'user', content: `开始${product.name}早会`, hidden: true },
+          { role: 'assistant', content: briefingReadout },
+        ]);
+        setLoading(false);
 
-    // Speak greeting, then auto-start listening in driving mode
-    setSpeaking(true);
-    await speak(greeting, config.lang);
-    setSpeaking(false);
+        setSpeaking(true);
+        await speak(briefingReadout, config.lang);
+        setSpeaking(false);
+      } catch (e) {
+        // Fallback to static greeting if AI fails
+        const fallback = `早上好。今天${product.name}有简报，但读取失败了。有什么想讨论的？`;
+        setMessages([{ role: 'assistant', content: fallback }]);
+        setLoading(false);
+        setSpeaking(true);
+        await speak(fallback, config.lang);
+        setSpeaking(false);
+      }
+    } else {
+      const greeting = `早上好。今天${product.name}暂时没有新的早报，有什么想讨论的？`;
+      setMessages([{ role: 'assistant', content: greeting }]);
+
+      setSpeaking(true);
+      await speak(greeting, config.lang);
+      setSpeaking(false);
+    }
 
     if (driving) {
       startListening();
@@ -368,7 +395,10 @@ function AppInner() {
     if (!selectedProduct || !summary) return;
     setPublishing(true);
     try {
+      // Dual publish: product channel + command channel
       await publishDirective(selectedProduct.id, summary);
+      // Command channel publish (best-effort, don't block on failure)
+      publishToCommand(selectedProduct.id, summary);
       setPublished(true);
     } catch (e) {
       setError(e.message);

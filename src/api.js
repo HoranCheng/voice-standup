@@ -87,6 +87,28 @@ export async function publishDirective(productId, content) {
 }
 
 /**
+ * Publish directive to the command channel (for 老顾 to dispatch).
+ * Falls back silently if command webhook is not configured.
+ */
+export async function publishToCommand(productId, content) {
+  try {
+    const res = await fetchWithTimeout(url('/api/publish-command'), {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify({ productId, content }),
+    });
+    if (!res.ok) {
+      console.warn('Command publish failed:', res.status);
+      return { ok: false };
+    }
+    return await res.json();
+  } catch (e) {
+    console.warn('Command publish error:', e);
+    return { ok: false };
+  }
+}
+
+/**
  * Store standup content (called by OpenClaw cron or manually).
  */
 export async function putStandup(productId, content) {
