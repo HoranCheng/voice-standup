@@ -206,9 +206,23 @@ function AppInner() {
   const stopListening = useCallback(() => {
     listeningRef.current = false;
     setListening(false);
-    const transcript = recRef.current?.getTranscript()?.trim();
-    recRef.current?.stop();
-    return transcript || '';
+    const rec = recRef.current;
+    if (!rec) return Promise.resolve('');
+
+    return new Promise((resolve) => {
+      // Wait for onend so isFinal has fired before reading transcript
+      const prevOnEnd = rec.onend;
+      const timeout = setTimeout(() => {
+        resolve(rec.getTranscript()?.trim() || '');
+      }, 2000); // safety timeout
+
+      rec.onend = () => {
+        clearTimeout(timeout);
+        prevOnEnd?.();
+        resolve(rec.getTranscript()?.trim() || '');
+      };
+      rec.stop();
+    });
   }, []);
 
   // ─── Send user message → AI → TTS ──────────────────────────────────────
@@ -375,17 +389,17 @@ function AppInner() {
     startListening();
   }, [startListening]);
 
-  const handlePushEnd = useCallback(() => {
-    const transcript = stopListening();
+  const handlePushEnd = useCallback(async () => {
+    const transcript = await stopListening();
     if (transcript) {
       handleUserMessage(transcript);
     }
   }, [stopListening, handleUserMessage]);
 
   // ─── End meeting manually ───────────────────────────────────────────────
-  const endMeeting = useCallback(() => {
+  const endMeeting = useCallback(async () => {
     setDrivingMode(false);
-    const transcript = stopListening();
+    const transcript = await stopListening();
     stopSpeaking();
     handleUserMessage(transcript ? transcript + ' 结束会议' : '结束会议，请整理指导意见。');
   }, [stopListening, handleUserMessage]);
