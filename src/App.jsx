@@ -567,6 +567,24 @@ function AppInner() {
             <span style={{ fontSize: 13, color: T.tx3, fontFamily: 'monospace' }}>{formatTime(elapsed)}</span>
           </div>
 
+          {/* Full-screen tap-to-skip overlay (driving mode + AI speaking) */}
+          {drivingMode && speaking_ && (
+            <div
+              onClick={() => { stopSpeaking(); }}
+              style={{
+                position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+                zIndex: 50, display: 'flex', flexDirection: 'column',
+                alignItems: 'center', justifyContent: 'center',
+                background: 'rgba(0,0,0,0.3)',
+                WebkitTapHighlightColor: 'transparent',
+                cursor: 'pointer',
+              }}
+            >
+              <div style={{ fontSize: 64, marginBottom: 16 }}>🔊</div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: '#fff' }}>点击任意位置跳过</div>
+            </div>
+          )}
+
           {/* Messages */}
           <div style={{ flex: 1, overflowY: 'auto', padding: '12px 0' }}>
             {messages.filter(m => !m.hidden).map((m, i) => (
