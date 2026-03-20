@@ -208,21 +208,7 @@ function AppInner() {
     setListening(false);
     const rec = recRef.current;
     if (!rec) return Promise.resolve('');
-
-    return new Promise((resolve) => {
-      // Wait for onend so isFinal has fired before reading transcript
-      const prevOnEnd = rec.onend;
-      const timeout = setTimeout(() => {
-        resolve(rec.getTranscript()?.trim() || '');
-      }, 2000); // safety timeout
-
-      rec.onend = () => {
-        clearTimeout(timeout);
-        prevOnEnd?.();
-        resolve(rec.getTranscript()?.trim() || '');
-      };
-      rec.stop();
-    });
+    return rec.stopAndWait(2000);
   }, []);
 
   // ─── Send user message → AI → TTS ──────────────────────────────────────

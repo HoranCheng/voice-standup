@@ -67,5 +67,21 @@ export function createRecognizer(lang = 'zh-CN', { onResult, onEnd, onError }) {
     abort() { rec.abort(); },
     getTranscript() { return finalTranscript; },
     resetTranscript() { finalTranscript = ''; },
+    /** Stop and wait for final transcript (resolves after onend fires) */
+    stopAndWait(timeoutMs = 2000) {
+      return new Promise((resolve) => {
+        const timer = setTimeout(() => {
+          resolve(finalTranscript?.trim() || '');
+        }, timeoutMs);
+
+        const prevOnEnd = rec.onend;
+        rec.onend = () => {
+          clearTimeout(timer);
+          prevOnEnd?.();
+          resolve(finalTranscript?.trim() || '');
+        };
+        rec.stop();
+      });
+    },
   };
 }
