@@ -2,6 +2,7 @@
   "name": "早会 Voice Standup",
   "short_name": "早会",
   "start_url": "/voice-standup/",
+  "scope": "/voice-standup/",
   "display": "standalone",
   "background_color": "#0a0a0f",
   "theme_color": "#0a0a0f",
