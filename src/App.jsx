@@ -616,6 +616,28 @@ function AppInner() {
             <div ref={chatEndRef} />
           </div>
 
+          {/* Full-screen skip overlay (driving mode + AI speaking) */}
+          {drivingMode && speaking_ && (
+            <div
+              onClick={() => stopSpeaking()}
+              style={{
+                position: 'fixed', inset: 0, zIndex: 100,
+                display: 'flex', alignItems: 'flex-end', justifyContent: 'center',
+                paddingBottom: 120, // above the controls
+                background: 'rgba(0,0,0,0.15)',
+                cursor: 'pointer',
+              }}
+            >
+              <div style={{
+                padding: '16px 32px', borderRadius: 20,
+                background: 'rgba(0,0,0,0.6)', color: '#fff',
+                fontSize: 18, fontWeight: 700,
+              }}>
+                点击任意位置跳过 ⏭
+              </div>
+            </div>
+          )}
+
           {/* Controls */}
           <div style={{
             display: 'flex', gap: 12, padding: '16px 0',
@@ -628,20 +650,19 @@ function AppInner() {
                   flex: 1, padding: '20px 16px', borderRadius: 20,
                   background: T.card, border: `1px solid ${T.bdr}`,
                   display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6,
-                }}
-                  onClick={speaking_ ? () => { stopSpeaking(); } : undefined}
-                >
+                }}>
                   <div style={{ fontSize: 28 }}>
                     {speaking_ ? '🔊' : listening ? '🔴' : loading ? '⏳' : '⏸'}
                   </div>
                   <div style={{ fontSize: 12, color: T.tx3 }}>
-                    {speaking_ ? '点击跳过 ⏭' : listening ? '正在聆听...' : loading ? '处理中' : '等待中'}
+                    {speaking_ ? 'AI 说话中' : listening ? '正在聆听...' : loading ? '处理中' : '等待中'}
                   </div>
                 </div>
                 <button onClick={endMeeting} style={{
                   padding: '0 24px', height: 64, borderRadius: 20,
                   border: `1px solid ${T.bdr}`, background: T.card,
                   color: T.tx, fontSize: 14, fontWeight: 700, cursor: 'pointer', fontFamily: F,
+                  position: 'relative', zIndex: 200,
                 }}>
                   ⏹ 结束
                 </button>
