@@ -107,7 +107,8 @@ function AppInner() {
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const [view, setView] = useState(autostartMode ? 'taptostart' : 'home');
+  // Default to driving mode (taptostart) always
+  const [view, setView] = useState('taptostart');
   const [config, setConfig] = useState(loadConfig);
   const [products, setProducts] = useState(() => config.products || []);
   const [selectedProduct, setSelectedProduct] = useState(null);
@@ -542,12 +543,26 @@ function AppInner() {
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <span style={{ width: 8, height: 8, borderRadius: '50%', background: T.red, animation: 'pulse 1.5s infinite' }} />
               <span style={{ fontSize: 13, fontWeight: 700 }}>早会进行中</span>
-              {drivingMode && (
-                <span style={{
-                  fontSize: 10, padding: '2px 8px', borderRadius: 6,
-                  background: 'rgba(245,158,11,0.2)', color: T.amber,
-                }}>🚗 驾车</span>
-              )}
+              <span
+                onClick={() => {
+                  if (drivingMode) {
+                    // Switch to manual: stop auto-listening
+                    setDrivingMode(false);
+                    listeningRef.current = false;
+                    setListening(false);
+                    recRef.current?.stop();
+                  } else {
+                    // Switch to driving: start auto-listening
+                    setDrivingMode(true);
+                    startListening();
+                  }
+                }}
+                style={{
+                  fontSize: 10, padding: '2px 8px', borderRadius: 6, cursor: 'pointer',
+                  background: drivingMode ? 'rgba(245,158,11,0.2)' : 'rgba(99,102,241,0.15)',
+                  color: drivingMode ? T.amber : T.acc,
+                }}
+              >{drivingMode ? '🚗 驾车' : '👆 手动'}</span>
             </div>
             <span style={{ fontSize: 13, color: T.tx3, fontFamily: 'monospace' }}>{formatTime(elapsed)}</span>
           </div>
