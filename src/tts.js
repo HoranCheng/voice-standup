@@ -1,7 +1,11 @@
-// ─── Text-to-Speech ──────────────────────────────────────────────────────────
+// ─── Text-to-Speech (Browser + ElevenLabs) ──────────────────────────────────
+
+import { ttsElevenLabs } from './api';
+import { loadConfig } from './config';
 
 let _speaking = false;
 let _cancel = false;
+let _currentAudio = null; // for ElevenLabs Audio element
 
 export function isTTSSupported() {
   return typeof window !== 'undefined' && 'speechSynthesis' in window;
@@ -10,6 +14,11 @@ export function isTTSSupported() {
 export function stopSpeaking() {
   _cancel = true;
   window.speechSynthesis?.cancel();
+  if (_currentAudio) {
+    _currentAudio.pause();
+    _currentAudio.src = '';
+    _currentAudio = null;
+  }
   _speaking = false;
 }
 
@@ -46,13 +55,61 @@ function waitForVoices() {
 }
 
 /**
- * Speak text using browser TTS.
+ * Speak text using ElevenLabs via Worker proxy. Returns true if successful.
+ */
+async function speakElevenLabs(text) {
+  const blob = await ttsElevenLabs(text);
+  if (!blob || _cancel) return false;
+
+  const audioUrl = URL.createObjectURL(blob);
+  const audio = new Audio(audioUrl);
+  _currentAudio = audio;
+
+  return new Promise((resolve) => {
+    audio.onended = () => {
+      URL.revokeObjectURL(audioUrl);
+      _currentAudio = null;
+      resolve(true);
+    };
+    audio.onerror = () => {
+      URL.revokeObjectURL(audioUrl);
+      _currentAudio = null;
+      resolve(false);
+    };
+    audio.play().catch(() => {
+      URL.revokeObjectURL(audioUrl);
+      _currentAudio = null;
+      resolve(false);
+    });
+  });
+}
+
+/**
+ * Speak text. Tries ElevenLabs first (if configured), falls back to browser TTS.
  * Splits long text into chunks to avoid the Chrome/Safari ~15s cutoff.
  */
 export async function speak(text, lang = 'zh-CN') {
-  if (!text || !isTTSSupported()) return;
+  if (!text) return;
   _cancel = false;
   _speaking = true;
+
+  // Try ElevenLabs first if configured
+  const cfg = loadConfig();
+  if (cfg.ttsEngine === 'elevenlabs') {
+    try {
+      const ok = await speakElevenLabs(text);
+      if (ok && !_cancel) {
+        _speaking = false;
+        return;
+      }
+    } catch (e) {
+      console.warn('ElevenLabs TTS failed, falling back to browser:', e);
+    }
+    if (_cancel) { _speaking = false; return; }
+  }
+
+  // Fallback: browser TTS
+  if (!isTTSSupported()) { _speaking = false; return; }
 
   const voices = await waitForVoices();
   const zhVoice = voices.find(v => v.lang.startsWith('zh')) ||

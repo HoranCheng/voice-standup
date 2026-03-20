@@ -109,6 +109,32 @@ export async function publishToCommand(productId, content) {
 }
 
 /**
+ * Get TTS audio from ElevenLabs via Worker proxy.
+ * Returns an audio Blob (audio/mpeg) or null if TTS not configured.
+ */
+export async function ttsElevenLabs(text, voiceId) {
+  try {
+    const body = { text };
+    if (voiceId) body.voiceId = voiceId;
+
+    const res = await fetchWithTimeout(url('/api/tts'), {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify(body),
+    }, 15000); // 15s timeout for TTS
+
+    if (!res.ok) {
+      console.warn('ElevenLabs TTS failed:', res.status);
+      return null;
+    }
+    return await res.blob();
+  } catch (e) {
+    console.warn('ElevenLabs TTS error:', e);
+    return null;
+  }
+}
+
+/**
  * Store standup content (called by OpenClaw cron or manually).
  */
 export async function putStandup(productId, content) {

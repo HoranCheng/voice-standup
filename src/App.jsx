@@ -595,12 +595,14 @@ function AppInner() {
                   flex: 1, padding: '20px 16px', borderRadius: 20,
                   background: T.card, border: `1px solid ${T.bdr}`,
                   display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6,
-                }}>
+                }}
+                  onClick={speaking_ ? () => { stopSpeaking(); } : undefined}
+                >
                   <div style={{ fontSize: 28 }}>
                     {speaking_ ? '🔊' : listening ? '🔴' : loading ? '⏳' : '⏸'}
                   </div>
                   <div style={{ fontSize: 12, color: T.tx3 }}>
-                    {speaking_ ? 'AI 说话中' : listening ? '正在聆听...' : loading ? '处理中' : '等待中'}
+                    {speaking_ ? '点击跳过 ⏭' : listening ? '正在聆听...' : loading ? '处理中' : '等待中'}
                   </div>
                 </div>
                 <button onClick={endMeeting} style={{

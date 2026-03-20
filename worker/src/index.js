@@ -180,6 +180,55 @@ export default {
         return json({ ok: true }, 200, env, origin);
       }
 
+      // ─── TTS (ElevenLabs proxy) ─────────────────────────────────────────
+      if (path === '/api/tts' && request.method === 'POST') {
+        const elevenKey = env.ELEVENLABS_API_KEY;
+        if (!elevenKey) {
+          return json({ error: 'TTS not configured' }, 400, env, origin);
+        }
+
+        let body;
+        try { body = await request.json(); }
+        catch { return json({ error: 'Invalid JSON' }, 400, env, origin); }
+
+        const text = String(body.text ?? '').slice(0, 5000);
+        if (!text) return json({ error: 'text required' }, 400, env, origin);
+
+        const voiceId = body.voiceId || env.ELEVENLABS_VOICE || 'pFZP5JQG7iQjIQuC4Bku'; // Lily default
+        const modelId = body.modelId || 'eleven_multilingual_v2';
+
+        const ttsRes = await fetch(
+          `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'xi-api-key': elevenKey,
+            },
+            body: JSON.stringify({
+              text,
+              model_id: modelId,
+              voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+            }),
+          }
+        );
+
+        if (!ttsRes.ok) {
+          const err = await ttsRes.text();
+          console.error('ElevenLabs TTS error:', ttsRes.status, err);
+          return json({ error: `TTS error (${ttsRes.status})` }, 502, env, origin);
+        }
+
+        // Stream audio back to client
+        return new Response(ttsRes.body, {
+          status: 200,
+          headers: {
+            'Content-Type': 'audio/mpeg',
+            ...corsHeaders(env, origin),
+          },
+        });
+      }
+
       return json({ error: 'Not found' }, 404, env, origin);
     } catch (e) {
       console.error('Worker error:', e);
