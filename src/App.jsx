@@ -206,9 +206,9 @@ function AppInner() {
   const stopListening = useCallback(() => {
     listeningRef.current = false;
     setListening(false);
-    const rec = recRef.current;
-    if (!rec) return Promise.resolve('');
-    return rec.stopAndWait(2000);
+    const transcript = recRef.current?.getTranscript()?.trim();
+    recRef.current?.stop();
+    return transcript || '';
   }, []);
 
   // ─── Send user message → AI → TTS ──────────────────────────────────────
@@ -375,8 +375,8 @@ function AppInner() {
     startListening();
   }, [startListening]);
 
-  const handlePushEnd = useCallback(async () => {
-    const transcript = await stopListening();
+  const handlePushEnd = useCallback(() => {
+    const transcript = stopListening();
     if (transcript) {
       handleUserMessage(transcript);
     }

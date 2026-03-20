@@ -52,6 +52,16 @@ export default {
           ? String(body.system || env.SYSTEM_PROMPT || '').slice(0, MAX_CONTENT_LEN)
           : (env.SYSTEM_PROMPT || '');
 
+        // Build request body — omit system if empty (Claude API rejects empty string)
+        // Use env.CLAUDE_MODEL if set, otherwise default to haiku 4.5
+        const model = env.CLAUDE_MODEL || 'claude-haiku-4-5-20251001';
+        const requestBody = {
+            model,
+            max_tokens: 4096,
+            messages: safeMessages,
+        };
+        if (system) requestBody.system = system;
+
         const res = await fetch('https://api.anthropic.com/v1/messages', {
           method: 'POST',
           headers: {
@@ -59,18 +69,14 @@ export default {
             'x-api-key': env.CLAUDE_API_KEY,
             'anthropic-version': '2023-06-01',
           },
-          body: JSON.stringify({
-            model: env.CLAUDE_MODEL || 'claude-sonnet-4-20250514',
-            max_tokens: 4096,
-            system,
-            messages: safeMessages,
-          }),
+          body: JSON.stringify(requestBody),
         });
 
         if (!res.ok) {
           const err = await res.text();
           console.error('Claude API error:', res.status, err);
-          return json({ error: `AI service error (${res.status})` }, 502, env, origin);
+          console.error('Claude API request body:', JSON.stringify(requestBody));
+          return json({ error: `AI service error (${res.status})`, detail: err }, 502, env, origin);
         }
 
         const data = await res.json();

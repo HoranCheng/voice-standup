@@ -24,6 +24,7 @@ export function createRecognizer(lang = 'zh-CN', { onResult, onEnd, onError }) {
   rec.maxAlternatives = 1;
 
   let finalTranscript = '';
+  let lastInterim = ''; // Track interim for fallback when stop() is called before isFinal
 
   rec.onresult = (e) => {
     let interim = '';
@@ -31,9 +32,11 @@ export function createRecognizer(lang = 'zh-CN', { onResult, onEnd, onError }) {
       const t = e.results[i][0].transcript;
       if (e.results[i].isFinal) {
         finalTranscript += t;
+        lastInterim = '';
         onResult?.({ final: finalTranscript, interim: '', isFinal: true });
       } else {
         interim += t;
+        lastInterim = interim;
         onResult?.({ final: finalTranscript, interim, isFinal: false });
       }
     }
@@ -62,11 +65,11 @@ export function createRecognizer(lang = 'zh-CN', { onResult, onEnd, onError }) {
   };
 
   return {
-    start() { finalTranscript = ''; rec.start(); },
+    start() { finalTranscript = ''; lastInterim = ''; rec.start(); },
     stop() { rec.stop(); },
     abort() { rec.abort(); },
-    getTranscript() { return finalTranscript; },
-    resetTranscript() { finalTranscript = ''; },
+    getTranscript() { return finalTranscript || lastInterim; }, // fallback to interim if final not yet fired
+    resetTranscript() { finalTranscript = ''; lastInterim = ''; },
     /** Stop and wait for final transcript (resolves after onend fires) */
     stopAndWait(timeoutMs = 2000) {
       return new Promise((resolve) => {
