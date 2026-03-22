@@ -119,6 +119,7 @@ function AppInner() {
   const [interim, setInterim] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const loadingRef = useRef(false);
   const [elapsed, setElapsed] = useState(0);
   const [summary, setSummary] = useState('');
   const [publishing, setPublishing] = useState(false);
@@ -215,6 +216,8 @@ function AppInner() {
   // ─── Send user message → AI → TTS ──────────────────────────────────────
   const handleUserMessage = useCallback(async (text) => {
     if (!text) return;
+    // Guard: prevent duplicate sends while already processing
+    if (loadingRef.current) return;
 
     const userMsg = { role: 'user', content: text };
     const updated = [...messagesRef.current, userMsg];
@@ -224,7 +227,7 @@ function AppInner() {
     const endTriggers = ['结束会议', '结束', '就这样', '好了', '结束吧'];
     const isEnd = endTriggers.some(t => text.includes(t));
 
-    setLoading(true);
+    setLoading(true); loadingRef.current = true;
     try {
       const chatMessages = updated
         .filter(m => !m.hidden)
@@ -285,7 +288,7 @@ function AppInner() {
         }
       }
     } finally {
-      setLoading(false);
+      setLoading(false); loadingRef.current = false;
     }
   }, [config.lang, startListening]);
 
@@ -333,7 +336,7 @@ function AppInner() {
       setMessages([{ role: 'assistant', content: '正在读取今日简报...' }]);
 
       try {
-        setLoading(true);
+        setLoading(true); loadingRef.current = true;
         const briefingReadout = await chat(
           [{ role: 'user', content: `早上好，请给我读一下今天${product.name}的简报要点。` }],
           systemWithStandup
@@ -342,7 +345,7 @@ function AppInner() {
           { role: 'user', content: `开始${product.name}早会`, hidden: true },
           { role: 'assistant', content: briefingReadout },
         ]);
-        setLoading(false);
+        setLoading(false); loadingRef.current = false;
 
         setSpeaking(true);
         await speak(briefingReadout, config.lang);
@@ -351,7 +354,7 @@ function AppInner() {
         // Fallback to static greeting if AI fails
         const fallback = `早上好。今天${product.name}有简报，但读取失败了。有什么想讨论的？`;
         setMessages([{ role: 'assistant', content: fallback }]);
-        setLoading(false);
+        setLoading(false); loadingRef.current = false;
         setSpeaking(true);
         await speak(fallback, config.lang);
         setSpeaking(false);
