@@ -231,8 +231,8 @@ export default {
 
       return json({ error: 'Not found' }, 404, env, origin);
     } catch (e) {
-      console.error('Worker error:', e);
-      return json({ error: 'Internal error' }, 500, env, origin);
+      console.error('Worker error:', e.message, e.stack);
+      return json({ error: 'Internal error', detail: e.message }, 500, env, origin);
     }
   },
 };
