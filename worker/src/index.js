@@ -10,6 +10,12 @@
 const MAX_MESSAGES = 50;
 const MAX_CONTENT_LEN = 8000;
 const PRODUCT_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+const TIMEZONE = 'Australia/Melbourne';
+
+/** Get today's date in AEST/AEDT (YYYY-MM-DD) */
+function todayAEST() {
+  return new Date().toLocaleDateString('en-CA', { timeZone: TIMEZONE });
+}
 const DISCORD_CHAR_LIMIT = 2000;
 
 /**
@@ -142,7 +148,7 @@ export default {
         // Use AEST date to match Henry's local calendar day
         // (UTC 19:10 = AEST 06:10 next day — without this fix, PUT at 6am AEST
         //  would use yesterday's UTC date, causing GET later to miss it)
-        const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Australia/Melbourne' });
+        const today = todayAEST();
         const key = `${productId}:${today}`;
 
         if (request.method === 'GET') {
