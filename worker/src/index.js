@@ -92,7 +92,10 @@ export default {
           return json({ error: 'Invalid productId' }, 400, env, origin);
         }
 
-        const today = new Date().toISOString().slice(0, 10);
+        // Use AEST date to match Henry's local calendar day
+        // (UTC 19:10 = AEST 06:10 next day — without this fix, PUT at 6am AEST
+        //  would use yesterday's UTC date, causing GET later to miss it)
+        const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Australia/Melbourne' });
         const key = `${productId}:${today}`;
 
         if (request.method === 'GET') {
