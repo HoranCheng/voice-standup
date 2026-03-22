@@ -14,41 +14,48 @@ const DISCORD_CHAR_LIMIT = 2000;
 
 /**
  * Send a message to a Discord webhook.
- * If content exceeds 2000 chars, sends as .txt file attachment with a short summary.
+ * If content exceeds 2000 chars, splits into multiple messages.
  */
 async function sendToWebhook(webhookUrl, content, options = {}) {
   const { username = '早会助手', productId = '', prefix = '' } = options;
   const fullContent = prefix ? `${prefix}\n\n${content}` : content;
 
   if (fullContent.length <= DISCORD_CHAR_LIMIT) {
-    // Short content: send as normal message
-    const res = await fetch(webhookUrl, {
+    return fetch(webhookUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content: fullContent, username }),
     });
-    return res;
   }
 
-  // Long content: send as file attachment
-  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Australia/Melbourne' });
-  const summary = fullContent.slice(0, 200) + '...\n\n_(完整内容见附件)_';
-  const fileName = productId
-    ? `${productId}-${today}.txt`
-    : `directive-${today}.txt`;
+  // Long content: split into chunks and send sequentially
+  // Discord allows 2000 chars per message; we use 1900 to leave room for chunk headers
+  const CHUNK_SIZE = 1900;
+  const chunks = [];
+  for (let i = 0; i < fullContent.length; i += CHUNK_SIZE) {
+    chunks.push(fullContent.slice(i, i + CHUNK_SIZE));
+  }
 
-  const formData = new FormData();
-  formData.append('payload_json', JSON.stringify({
-    content: summary,
-    username,
-  }));
-  formData.append('files[0]', new Blob([content], { type: 'text/plain; charset=utf-8' }), fileName);
+  let lastRes = null;
+  for (let i = 0; i < chunks.length; i++) {
+    const chunkHeader = chunks.length > 1 ? `**(${i + 1}/${chunks.length})**\n` : '';
+    const chunkContent = chunkHeader + chunks[i];
 
-  const res = await fetch(webhookUrl, {
-    method: 'POST',
-    body: formData,
-  });
-  return res;
+    lastRes = await fetch(webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: chunkContent, username }),
+    });
+
+    if (!lastRes.ok) return lastRes;
+
+    // Small delay between messages to avoid rate limit
+    if (i < chunks.length - 1) {
+      await new Promise(r => setTimeout(r, 500));
+    }
+  }
+
+  return lastRes;
 }
 
 export default {
