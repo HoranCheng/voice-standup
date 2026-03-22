@@ -10,6 +10,46 @@
 const MAX_MESSAGES = 50;
 const MAX_CONTENT_LEN = 8000;
 const PRODUCT_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+const DISCORD_CHAR_LIMIT = 2000;
+
+/**
+ * Send a message to a Discord webhook.
+ * If content exceeds 2000 chars, sends as .txt file attachment with a short summary.
+ */
+async function sendToWebhook(webhookUrl, content, options = {}) {
+  const { username = '早会助手', productId = '', prefix = '' } = options;
+  const fullContent = prefix ? `${prefix}\n\n${content}` : content;
+
+  if (fullContent.length <= DISCORD_CHAR_LIMIT) {
+    // Short content: send as normal message
+    const res = await fetch(webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: fullContent, username }),
+    });
+    return res;
+  }
+
+  // Long content: send as file attachment
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Australia/Melbourne' });
+  const summary = fullContent.slice(0, 200) + '...\n\n_(完整内容见附件)_';
+  const fileName = productId
+    ? `${productId}-${today}.txt`
+    : `directive-${today}.txt`;
+
+  const formData = new FormData();
+  formData.append('payload_json', JSON.stringify({
+    content: summary,
+    username,
+  }));
+  formData.append('files[0]', new Blob([content], { type: 'text/plain; charset=utf-8' }), fileName);
+
+  const res = await fetch(webhookUrl, {
+    method: 'POST',
+    body: formData,
+  });
+  return res;
+}
 
 export default {
   async fetch(request, env) {
@@ -131,14 +171,10 @@ export default {
           return json({ error: 'Command webhook not configured' }, 400, env, origin);
         }
 
-        const safeContent = String(content ?? '').slice(0, 2000);
-        const discordRes = await fetch(webhookUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            content: `📋 **${productId} — 指导意见**\n\n${safeContent}`,
-            username: '早会助手',
-          }),
+        const safeContent = String(content ?? '');
+        const discordRes = await sendToWebhook(webhookUrl, safeContent, {
+          productId,
+          prefix: `📋 **${productId} — 指导意见**`,
         });
 
         if (!discordRes.ok) {
@@ -165,15 +201,8 @@ export default {
           return json({ error: `No webhook configured for product: ${productId}` }, 400, env, origin);
         }
 
-        const safeContent = String(content ?? '').slice(0, 2000);
-        const discordRes = await fetch(webhookUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            content: safeContent,
-            username: '早会助手',
-          }),
-        });
+        const safeContent = String(content ?? '');
+        const discordRes = await sendToWebhook(webhookUrl, safeContent, { productId });
 
         if (!discordRes.ok) {
           console.error('Discord webhook error:', discordRes.status);
