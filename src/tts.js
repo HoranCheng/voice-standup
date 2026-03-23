@@ -176,7 +176,8 @@ export async function speak(text, lang = 'zh-CN') {
   const engine = cfg.ttsEngine || 'gtranslate';
 
   // Try server TTS first (Google Translate via Worker proxy)
-  if (engine === 'gtranslate') {
+  // Accept all legacy engine names: 'free', 'edge', 'gtranslate' → all route to Worker proxy
+  if (engine !== 'browser' && engine !== 'elevenlabs') {
     try {
       const ok = await speakServer(segments, lang);
       if (ok || _cancel) { _speaking = false; return; }
