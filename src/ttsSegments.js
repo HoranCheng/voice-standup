@@ -1,6 +1,6 @@
 export const DEFAULT_TTS_SEGMENT_RULES = {
-  maxChars: 120,
-  commaSoftLimit: 36,
+  maxChars: 180, // Google Translate TTS limit ~200 chars; keep margin
+  commaSoftLimit: 50,
   pauseMs: 180,
   sentenceRegex: /[^。！？；：!?;:\n]+[。！？；：!?;:\n]?/g,
   clauseRegex: /[^，、,]+[，、,]?/g,

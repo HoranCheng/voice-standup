@@ -1,13 +1,13 @@
 // ─── Text-to-Speech (Provider Abstraction) ───────────────────────────────────
 //
-// Providers:  free (Edge TTS client-side WS) → browser (SpeechSynthesis)
+// Providers:  server (Worker proxy → Google TTS) → browser (SpeechSynthesis)
 // Segments:   Long text split into natural segments, played sequentially
 // Driving:    Mutual exclusion — no overlapping audio, interruptible
 // Audio path: <audio> element → media volume channel (phone volume keys work)
 
+import { ttsAudio } from './api';
 import { loadConfig } from './config';
 import { splitTextForTTS } from './ttsSegments';
-import { edgeTTS } from './edgeTTS';
 
 // ─── Playback state (singleton) ──────────────────────────────────────────────
 let _speaking = false;
@@ -40,7 +40,7 @@ export function unlockAudio() {
     utt.volume = 0;
     window.speechSynthesis.speak(utt);
   }
-  // Also unlock <audio> playback context for Edge TTS
+  // Also unlock <audio> playback context
   try {
     const a = new Audio();
     a.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
@@ -76,23 +76,22 @@ function playAudioBlob(blob) {
   });
 }
 
-// ─── Provider: Edge TTS (client-side WebSocket, no Worker needed) ────────────
+// ─── Provider: Server TTS (Worker proxy → Google Translate TTS) ──────────────
 
-async function speakEdge(segments, voice) {
-  const PAUSE_MS = 180;
+async function speakServer(segments, lang) {
+  const PAUSE_MS = 250;
   for (let i = 0; i < segments.length; i++) {
     if (_cancel) return true;
     try {
-      const blob = await edgeTTS(segments[i], { voice });
-      if (_cancel) return true;
+      const blob = await ttsAudio(segments[i], { provider: 'free', lang });
+      if (!blob || _cancel) return !_cancel;
       const ok = await playAudioBlob(blob);
       if (!ok && !_cancel) return false;
-      // Pause between segments (except last)
       if (i < segments.length - 1 && !_cancel) {
         await new Promise(r => setTimeout(r, PAUSE_MS));
       }
     } catch (e) {
-      console.warn('Edge TTS segment failed:', e);
+      console.warn('Server TTS segment failed:', e);
       return false;
     }
   }
@@ -174,16 +173,15 @@ export async function speak(text, lang = 'zh-CN') {
   const segments = splitTextForTTS(text);
   if (segments.length === 0) { _speaking = false; return; }
 
-  const engine = cfg.ttsEngine || 'edge';
+  const engine = cfg.ttsEngine || 'free';
 
-  // Try Edge TTS first (experimental, non-official endpoint)
-  if (engine === 'edge') {
+  // Try server TTS first (Google Translate via Worker proxy)
+  if (engine === 'free' || engine === 'edge') {
     try {
-      const voice = cfg.ttsVoice || 'zh-CN-XiaoxiaoNeural';
-      const ok = await speakEdge(segments, voice);
+      const ok = await speakServer(segments, lang);
       if (ok || _cancel) { _speaking = false; return; }
     } catch (e) {
-      console.warn('Edge TTS failed, falling back to browser:', e);
+      console.warn('Server TTS failed, falling back to browser:', e);
     }
     if (_cancel) { _speaking = false; return; }
   }
