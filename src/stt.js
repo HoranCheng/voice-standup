@@ -25,6 +25,8 @@ export function createRecognizer(lang = 'zh-CN', { onResult, onEnd, onError }) {
 
   let finalTranscript = '';
   let lastInterim = ''; // Track interim for fallback when stop() is called before isFinal
+  let settleTimer = null; // isFinal settle window
+  const SETTLE_MS = 1500; // Wait 1.5s after isFinal before confirming
 
   rec.onresult = (e) => {
     let interim = '';
@@ -33,10 +35,25 @@ export function createRecognizer(lang = 'zh-CN', { onResult, onEnd, onError }) {
       if (e.results[i].isFinal) {
         finalTranscript += t;
         lastInterim = '';
-        onResult?.({ final: finalTranscript, interim: '', isFinal: true });
+
+        // Cancel any pending settle timer (new final came in)
+        if (settleTimer) { clearTimeout(settleTimer); settleTimer = null; }
+
+        // Start settle window: wait 1.5s for more speech before confirming
+        settleTimer = setTimeout(() => {
+          settleTimer = null;
+          onResult?.({ final: finalTranscript, interim: '', isFinal: true });
+        }, SETTLE_MS);
+
+        // Immediately report as interim (so UI shows what user said)
+        onResult?.({ final: finalTranscript, interim: '', isFinal: false });
       } else {
         interim += t;
         lastInterim = interim;
+
+        // If we have a pending settle timer, cancel it (user still speaking)
+        if (settleTimer) { clearTimeout(settleTimer); settleTimer = null; }
+
         onResult?.({ final: finalTranscript, interim, isFinal: false });
       }
     }
@@ -65,9 +82,9 @@ export function createRecognizer(lang = 'zh-CN', { onResult, onEnd, onError }) {
   };
 
   return {
-    start() { finalTranscript = ''; lastInterim = ''; rec.start(); },
-    stop() { rec.stop(); },
-    abort() { rec.abort(); },
+    start() { finalTranscript = ''; lastInterim = ''; if (settleTimer) { clearTimeout(settleTimer); settleTimer = null; } rec.start(); },
+    stop() { if (settleTimer) { clearTimeout(settleTimer); settleTimer = null; } rec.stop(); },
+    abort() { if (settleTimer) { clearTimeout(settleTimer); settleTimer = null; } rec.abort(); },
     getTranscript() { return finalTranscript || lastInterim; }, // fallback to interim if final not yet fired
     resetTranscript() { finalTranscript = ''; lastInterim = ''; },
     /** Stop and wait for final transcript (resolves after onend fires) */

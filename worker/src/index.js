@@ -115,6 +115,11 @@ export default {
         };
         if (system) requestBody.system = system;
 
+        // 60s timeout (Cloudflare Workers paid plan allows up to 30s CPU;
+        // but wall-clock time for subrequests is not limited the same way)
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 60000);
+
         const res = await fetch('https://api.anthropic.com/v1/messages', {
           method: 'POST',
           headers: {
@@ -123,7 +128,10 @@ export default {
             'anthropic-version': '2023-06-01',
           },
           body: JSON.stringify(requestBody),
+          signal: controller.signal,
         });
+
+        clearTimeout(timeoutId);
 
         if (!res.ok) {
           const err = await res.text();
