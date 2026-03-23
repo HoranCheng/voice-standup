@@ -8,7 +8,7 @@ const DEFAULT = {
   workerUrl: '', // Cloudflare Worker proxy URL
   authToken: '', // Bearer token for Worker auth
   products: [],  // [{ id, name, discordChannelId, webhookUrl }]
-  ttsEngine: 'edge', // 'edge' | 'browser' | 'elevenlabs'
+  ttsEngine: 'gtranslate', // 'gtranslate' | 'browser' | 'elevenlabs'
   ttsVoice: 'zh-CN-XiaoxiaoNeural',
   elevenLabsKey: '',
   elevenLabsVoice: 'Rachel',

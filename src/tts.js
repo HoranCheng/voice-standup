@@ -173,10 +173,10 @@ export async function speak(text, lang = 'zh-CN') {
   const segments = splitTextForTTS(text);
   if (segments.length === 0) { _speaking = false; return; }
 
-  const engine = cfg.ttsEngine || 'free';
+  const engine = cfg.ttsEngine || 'gtranslate';
 
   // Try server TTS first (Google Translate via Worker proxy)
-  if (engine === 'free' || engine === 'edge') {
+  if (engine === 'gtranslate') {
     try {
       const ok = await speakServer(segments, lang);
       if (ok || _cancel) { _speaking = false; return; }
