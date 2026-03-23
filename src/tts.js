@@ -1,11 +1,18 @@
-// ─── Text-to-Speech (Browser + ElevenLabs) ──────────────────────────────────
+// ─── Text-to-Speech (Provider Abstraction) ───────────────────────────────────
+//
+// Providers:  free (Edge TTS client-side WS) → browser (SpeechSynthesis)
+// Segments:   Long text split into natural segments, played sequentially
+// Driving:    Mutual exclusion — no overlapping audio, interruptible
+// Audio path: <audio> element → media volume channel (phone volume keys work)
 
-import { ttsElevenLabs } from './api';
 import { loadConfig } from './config';
+import { splitTextForTTS } from './ttsSegments';
+import { edgeTTS } from './edgeTTS';
 
+// ─── Playback state (singleton) ──────────────────────────────────────────────
 let _speaking = false;
 let _cancel = false;
-let _currentAudio = null; // for ElevenLabs Audio element
+let _currentAudio = null;
 
 export function isTTSSupported() {
   return typeof window !== 'undefined' && 'speechSynthesis' in window;
@@ -28,39 +35,24 @@ export function isSpeaking() { return _speaking; }
  * Unlock iOS audio context — call synchronously inside a user gesture handler.
  */
 export function unlockAudio() {
-  if (!isTTSSupported()) return;
-  const utt = new SpeechSynthesisUtterance('');
-  utt.volume = 0;
-  window.speechSynthesis.speak(utt);
+  if (isTTSSupported()) {
+    const utt = new SpeechSynthesisUtterance('');
+    utt.volume = 0;
+    window.speechSynthesis.speak(utt);
+  }
+  // Also unlock <audio> playback context for Edge TTS
+  try {
+    const a = new Audio();
+    a.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
+    a.volume = 0;
+    a.play().catch(() => {});
+  } catch {}
 }
 
-/**
- * Wait for voices to load (async-safe, no listener leaks).
- */
-function waitForVoices() {
-  return new Promise((resolve) => {
-    const voices = window.speechSynthesis.getVoices();
-    if (voices.length > 0) { resolve(voices); return; }
-    const handler = () => {
-      window.speechSynthesis.removeEventListener('voiceschanged', handler);
-      resolve(window.speechSynthesis.getVoices());
-    };
-    window.speechSynthesis.addEventListener('voiceschanged', handler);
-    // Timeout fallback — some browsers never fire voiceschanged
-    setTimeout(() => {
-      window.speechSynthesis.removeEventListener('voiceschanged', handler);
-      resolve(window.speechSynthesis.getVoices());
-    }, 2000);
-  });
-}
+// ─── Audio segment player ────────────────────────────────────────────────────
 
-/**
- * Speak text using ElevenLabs via Worker proxy. Returns true if successful.
- */
-async function speakElevenLabs(text) {
-  const blob = await ttsElevenLabs(text);
-  if (!blob || _cancel) return false;
-
+function playAudioBlob(blob) {
+  if (_cancel) return Promise.resolve(false);
   const audioUrl = URL.createObjectURL(blob);
   const audio = new Audio(audioUrl);
   _currentAudio = audio;
@@ -84,38 +76,54 @@ async function speakElevenLabs(text) {
   });
 }
 
-/**
- * Speak text. Tries ElevenLabs first (if configured), falls back to browser TTS.
- * Splits long text into chunks to avoid the Chrome/Safari ~15s cutoff.
- */
-export async function speak(text, lang = 'zh-CN') {
-  if (!text) return;
-  _cancel = false;
-  _speaking = true;
+// ─── Provider: Edge TTS (client-side WebSocket, no Worker needed) ────────────
 
-  // Try ElevenLabs first if configured
-  const cfg = loadConfig();
-  if (cfg.ttsEngine === 'elevenlabs') {
+async function speakEdge(segments, voice) {
+  const PAUSE_MS = 180;
+  for (let i = 0; i < segments.length; i++) {
+    if (_cancel) return true;
     try {
-      const ok = await speakElevenLabs(text);
-      if (ok && !_cancel) {
-        _speaking = false;
-        return;
+      const blob = await edgeTTS(segments[i], { voice });
+      if (_cancel) return true;
+      const ok = await playAudioBlob(blob);
+      if (!ok && !_cancel) return false;
+      // Pause between segments (except last)
+      if (i < segments.length - 1 && !_cancel) {
+        await new Promise(r => setTimeout(r, PAUSE_MS));
       }
     } catch (e) {
-      console.warn('ElevenLabs TTS failed, falling back to browser:', e);
+      console.warn('Edge TTS segment failed:', e);
+      return false;
     }
-    if (_cancel) { _speaking = false; return; }
   }
+  return true;
+}
 
-  // Fallback: browser TTS
-  if (!isTTSSupported()) { _speaking = false; return; }
+// ─── Provider: Browser SpeechSynthesis (fallback) ────────────────────────────
+
+function waitForVoices() {
+  return new Promise((resolve) => {
+    const voices = window.speechSynthesis.getVoices();
+    if (voices.length > 0) { resolve(voices); return; }
+    const handler = () => {
+      window.speechSynthesis.removeEventListener('voiceschanged', handler);
+      resolve(window.speechSynthesis.getVoices());
+    };
+    window.speechSynthesis.addEventListener('voiceschanged', handler);
+    setTimeout(() => {
+      window.speechSynthesis.removeEventListener('voiceschanged', handler);
+      resolve(window.speechSynthesis.getVoices());
+    }, 2000);
+  });
+}
+
+async function speakBrowser(segments, lang) {
+  if (!isTTSSupported()) return false;
 
   const voices = await waitForVoices();
   const zhVoice = voices.find(v => v.lang.startsWith('zh')) ||
                   voices.find(v => v.lang.startsWith('cmn'));
 
-  // iOS keep-alive: prevents synthesis from pausing on screen lock
   const isIOS = /iPhone|iPad/.test(navigator.userAgent);
   let keepAlive;
   if (isIOS) {
@@ -127,67 +135,60 @@ export async function speak(text, lang = 'zh-CN') {
     }, 10000);
   }
 
-  // Smart chunking strategy:
-  // 1. Split by sentence-ending punctuation (。！？.!?\n；)
-  // 2. If any chunk > 50 chars, further split by comma (，,、)
-  // 3. If still > 50 chars, hard-break at 50
-  // 4. 200ms pause between chunks for natural rhythm
-  const MAX_CHUNK = 50;
-  const rawChunks = text.match(/[^。！？；.!?\n]+[。！？；.!?\n]?/g) || [text];
-  const chunks = [];
-
-  for (const raw of rawChunks) {
-    const trimmed = raw.trim();
-    if (!trimmed) continue;
-
-    if (trimmed.length <= MAX_CHUNK) {
-      chunks.push(trimmed);
-    } else {
-      // Split by comma
-      const subChunks = trimmed.match(/[^，,、]+[，,、]?/g) || [trimmed];
-      for (const sub of subChunks) {
-        const s = sub.trim();
-        if (!s) continue;
-        if (s.length <= MAX_CHUNK) {
-          chunks.push(s);
-        } else {
-          // Hard-break at MAX_CHUNK
-          for (let j = 0; j < s.length; j += MAX_CHUNK) {
-            chunks.push(s.slice(j, j + MAX_CHUNK));
-          }
-        }
-      }
-    }
-  }
-
-  const PAUSE_MS = 200; // pause between chunks
+  const PAUSE_MS = 200;
 
   return new Promise((resolve) => {
     let i = 0;
     function next() {
-      if (_cancel || i >= chunks.length) {
+      if (_cancel || i >= segments.length) {
         clearInterval(keepAlive);
-        _speaking = false;
-        resolve();
+        resolve(!_cancel);
         return;
       }
-      const utt = new SpeechSynthesisUtterance(chunks[i].trim());
+      const utt = new SpeechSynthesisUtterance(segments[i]);
       utt.lang = lang;
       utt.rate = 1.1;
       utt.pitch = 1.0;
       if (zhVoice) utt.voice = zhVoice;
 
-      utt.onend = () => {
-        i++;
-        // Add natural pause between chunks
-        setTimeout(next, PAUSE_MS);
-      };
-      utt.onerror = () => {
-        i++;
-        setTimeout(next, PAUSE_MS);
-      };
+      utt.onend = () => { i++; setTimeout(next, PAUSE_MS); };
+      utt.onerror = () => { i++; setTimeout(next, PAUSE_MS); };
       window.speechSynthesis.speak(utt);
     }
     next();
   });
+}
+
+// ─── Main speak() — provider cascade with fallback ───────────────────────────
+
+export async function speak(text, lang = 'zh-CN') {
+  if (!text) return;
+
+  // Mutual exclusion: stop any previous speech
+  if (_speaking) stopSpeaking();
+
+  _cancel = false;
+  _speaking = true;
+
+  const cfg = loadConfig();
+  const segments = splitTextForTTS(text);
+  if (segments.length === 0) { _speaking = false; return; }
+
+  const engine = cfg.ttsEngine || 'free';
+
+  // Try Edge TTS first (free provider or default)
+  if (engine === 'free') {
+    try {
+      const voice = cfg.ttsVoice || 'zh-CN-XiaoxiaoNeural';
+      const ok = await speakEdge(segments, voice);
+      if (ok || _cancel) { _speaking = false; return; }
+    } catch (e) {
+      console.warn('Edge TTS failed, falling back to browser:', e);
+    }
+    if (_cancel) { _speaking = false; return; }
+  }
+
+  // Fallback: browser TTS
+  await speakBrowser(segments, lang);
+  _speaking = false;
 }

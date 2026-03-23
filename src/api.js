@@ -2,7 +2,7 @@
 
 import { loadConfig } from './config';
 
-const API_TIMEOUT_MS = 30000; // 30s timeout for Claude API calls
+const API_TIMEOUT_MS = 60000; // 60s timeout for Claude API calls
 
 function headers() {
   const cfg = loadConfig();
@@ -109,27 +109,28 @@ export async function publishToCommand(productId, content) {
 }
 
 /**
- * Get TTS audio from ElevenLabs via Worker proxy.
- * Returns an audio Blob (audio/mpeg) or null if TTS not configured.
+ * Get TTS audio from Worker proxy.
+ * provider: 'free' | 'elevenlabs'
+ * Returns an audio Blob (audio/mpeg) or null if provider fails.
  */
-export async function ttsElevenLabs(text, voiceId) {
+export async function ttsAudio(text, { provider = 'free', voice, lang = 'zh-CN' } = {}) {
   try {
-    const body = { text };
-    if (voiceId) body.voiceId = voiceId;
+    const body = { text, provider, lang };
+    if (voice) body.voice = voice;
 
     const res = await fetchWithTimeout(url('/api/tts'), {
       method: 'POST',
       headers: headers(),
       body: JSON.stringify(body),
-    }, 15000); // 15s timeout for TTS
+    }, 20000);
 
     if (!res.ok) {
-      console.warn('ElevenLabs TTS failed:', res.status);
+      console.warn(`${provider} TTS failed:`, res.status);
       return null;
     }
     return await res.blob();
   } catch (e) {
-    console.warn('ElevenLabs TTS error:', e);
+    console.warn(`${provider} TTS error:`, e);
     return null;
   }
 }
