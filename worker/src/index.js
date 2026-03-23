@@ -235,82 +235,8 @@ export default {
         return json({ ok: true }, 200, env, origin);
       }
 
-      // ─── TTS (Edge TTS free / ElevenLabs) ──────────────────────────────
-      if (path === '/api/tts' && request.method === 'POST') {
-        let body;
-        try { body = await request.json(); }
-        catch { return json({ error: 'Invalid JSON' }, 400, env, origin); }
-
-        const text = String(body.text ?? '').slice(0, 5000);
-        if (!text) return json({ error: 'text required' }, 400, env, origin);
-
-        const provider = body.provider || 'free';
-
-        // ── Google Translate TTS (free fallback, no API key needed) ──
-        if (provider === 'free') {
-          const lang = body.lang || 'zh-CN';
-          const encodedText = encodeURIComponent(text.slice(0, 200));
-          try {
-            const gttsRes = await fetch(
-              `https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=${lang}&q=${encodedText}`,
-              { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' } }
-            );
-            if (!gttsRes.ok) {
-              return json({ error: `Google TTS failed (${gttsRes.status})` }, 502, env, origin);
-            }
-            return new Response(gttsRes.body, {
-              status: 200,
-              headers: {
-                'Content-Type': 'audio/mpeg',
-                'Cache-Control': 'no-store',
-                ...corsHeaders(env, origin),
-              },
-            });
-          } catch (e) {
-            console.error('Google TTS error:', e.message);
-            return json({ error: `Google TTS failed: ${e.message}` }, 502, env, origin);
-          }
-        }
-
-        // ── ElevenLabs (paid, needs API key) ──
-        const elevenKey = env.ELEVENLABS_API_KEY;
-        if (!elevenKey) {
-          return json({ error: 'ElevenLabs TTS not configured' }, 400, env, origin);
-        }
-
-        const voiceId = body.voiceId || env.ELEVENLABS_VOICE || 'pFZP5JQG7iQjIQuC4Bku';
-        const modelId = body.modelId || 'eleven_multilingual_v2';
-
-        const ttsRes = await fetch(
-          `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`,
-          {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'xi-api-key': elevenKey,
-            },
-            body: JSON.stringify({
-              text,
-              model_id: modelId,
-              voice_settings: { stability: 0.5, similarity_boost: 0.75 },
-            }),
-          }
-        );
-
-        if (!ttsRes.ok) {
-          const err = await ttsRes.text();
-          console.error('ElevenLabs TTS error:', ttsRes.status, err);
-          return json({ error: `TTS error (${ttsRes.status})` }, 502, env, origin);
-        }
-
-        return new Response(ttsRes.body, {
-          status: 200,
-          headers: {
-            'Content-Type': 'audio/mpeg',
-            ...corsHeaders(env, origin),
-          },
-        });
-      }
+      // TTS endpoint removed — Edge TTS runs client-side (edgeTTS.js),
+      // browser SpeechSynthesis is the fallback. No Worker TTS in the cascade.
 
       return json({ error: 'Not found' }, 404, env, origin);
     } catch (e) {

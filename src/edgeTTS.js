@@ -111,11 +111,8 @@ export function edgeTTS(text, {
     ws.onclose = () => {
       clearTimeout(timeout);
       if (!done) {
-        if (audioChunks.length > 0) {
-          resolve(new Blob(audioChunks, { type: 'audio/mpeg' }));
-        } else {
-          reject(new Error('Edge TTS WebSocket closed without audio'));
-        }
+        // No turn.end received = incomplete synthesis, always reject
+        reject(new Error('Edge TTS WebSocket closed without turn.end'));
       }
     };
   });

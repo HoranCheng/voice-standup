@@ -174,10 +174,10 @@ export async function speak(text, lang = 'zh-CN') {
   const segments = splitTextForTTS(text);
   if (segments.length === 0) { _speaking = false; return; }
 
-  const engine = cfg.ttsEngine || 'free';
+  const engine = cfg.ttsEngine || 'edge';
 
-  // Try Edge TTS first (free provider or default)
-  if (engine === 'free') {
+  // Try Edge TTS first (experimental, non-official endpoint)
+  if (engine === 'edge') {
     try {
       const voice = cfg.ttsVoice || 'zh-CN-XiaoxiaoNeural';
       const ok = await speakEdge(segments, voice);

@@ -110,30 +110,9 @@ export async function publishToCommand(productId, content) {
 
 /**
  * Get TTS audio from Worker proxy.
- * provider: 'free' | 'elevenlabs'
- * Returns an audio Blob (audio/mpeg) or null if provider fails.
+ * Worker TTS endpoint removed — TTS runs client-side (edgeTTS.js → browser fallback).
+ * ttsAudio() is no longer used and has been deleted.
  */
-export async function ttsAudio(text, { provider = 'free', voice, lang = 'zh-CN' } = {}) {
-  try {
-    const body = { text, provider, lang };
-    if (voice) body.voice = voice;
-
-    const res = await fetchWithTimeout(url('/api/tts'), {
-      method: 'POST',
-      headers: headers(),
-      body: JSON.stringify(body),
-    }, 20000);
-
-    if (!res.ok) {
-      console.warn(`${provider} TTS failed:`, res.status);
-      return null;
-    }
-    return await res.blob();
-  } catch (e) {
-    console.warn(`${provider} TTS error:`, e);
-    return null;
-  }
-}
 
 /**
  * Store standup content (called by OpenClaw cron or manually).
