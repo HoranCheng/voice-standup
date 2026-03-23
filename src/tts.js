@@ -127,8 +127,40 @@ export async function speak(text, lang = 'zh-CN') {
     }, 10000);
   }
 
-  // Split by sentence-ending punctuation
-  const chunks = text.match(/[^。！？.!?\n]+[。！？.!?\n]?/g) || [text];
+  // Smart chunking strategy:
+  // 1. Split by sentence-ending punctuation (。！？.!?\n；)
+  // 2. If any chunk > 50 chars, further split by comma (，,、)
+  // 3. If still > 50 chars, hard-break at 50
+  // 4. 200ms pause between chunks for natural rhythm
+  const MAX_CHUNK = 50;
+  const rawChunks = text.match(/[^。！？；.!?\n]+[。！？；.!?\n]?/g) || [text];
+  const chunks = [];
+
+  for (const raw of rawChunks) {
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+
+    if (trimmed.length <= MAX_CHUNK) {
+      chunks.push(trimmed);
+    } else {
+      // Split by comma
+      const subChunks = trimmed.match(/[^，,、]+[，,、]?/g) || [trimmed];
+      for (const sub of subChunks) {
+        const s = sub.trim();
+        if (!s) continue;
+        if (s.length <= MAX_CHUNK) {
+          chunks.push(s);
+        } else {
+          // Hard-break at MAX_CHUNK
+          for (let j = 0; j < s.length; j += MAX_CHUNK) {
+            chunks.push(s.slice(j, j + MAX_CHUNK));
+          }
+        }
+      }
+    }
+  }
+
+  const PAUSE_MS = 200; // pause between chunks
 
   return new Promise((resolve) => {
     let i = 0;
@@ -145,8 +177,15 @@ export async function speak(text, lang = 'zh-CN') {
       utt.pitch = 1.0;
       if (zhVoice) utt.voice = zhVoice;
 
-      utt.onend = () => { i++; next(); };
-      utt.onerror = () => { i++; next(); };
+      utt.onend = () => {
+        i++;
+        // Add natural pause between chunks
+        setTimeout(next, PAUSE_MS);
+      };
+      utt.onerror = () => {
+        i++;
+        setTimeout(next, PAUSE_MS);
+      };
       window.speechSynthesis.speak(utt);
     }
     next();
