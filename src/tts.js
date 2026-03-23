@@ -175,9 +175,10 @@ export async function speak(text, lang = 'zh-CN') {
 
   const engine = cfg.ttsEngine || 'gtranslate';
 
-  // Try server TTS first (Google Translate via Worker proxy)
-  // Accept all legacy engine names: 'free', 'edge', 'gtranslate' → all route to Worker proxy
-  if (engine !== 'browser' && engine !== 'elevenlabs') {
+  // Explicit whitelist: only known engines route to Worker proxy (gtranslate)
+  // Includes legacy values 'free'/'edge' for backward compat with cached localStorage
+  const GTRANSLATE_ENGINES = ['gtranslate', 'free', 'edge'];
+  if (GTRANSLATE_ENGINES.includes(engine)) {
     try {
       const ok = await speakServer(segments, lang);
       if (ok || _cancel) { _speaking = false; return; }
@@ -185,6 +186,9 @@ export async function speak(text, lang = 'zh-CN') {
       console.warn('Server TTS failed, falling back to browser:', e);
     }
     if (_cancel) { _speaking = false; return; }
+  } else if (engine !== 'browser') {
+    // Unknown engine value — warn and fall through to browser TTS
+    console.warn(`Unknown ttsEngine "${engine}", falling back to browser TTS`);
   }
 
   // Fallback: browser TTS
