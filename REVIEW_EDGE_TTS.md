@@ -1,4 +1,4 @@
-# Edge TTS Review Package
+# Edge TTS Review Package (PASSED — fc31cf8)
 
 ## Review 目标
 Edge TTS 实验性接入 + 文本分段 + provider fallback
@@ -38,11 +38,11 @@ speak(text)
 - 合并后仍超 120 字 → 硬切 120 字
 - 参数全部可配：`maxChars=120, commaSoftLimit=36, pauseMs=180`
 
-## edgeTTS.js fallback 边界条件
+## edgeTTS.js fallback 边界条件 (fc31cf8 updated)
 - WS 连接失败 → onerror → reject → speakEdge catch → 返回 false
 - WS 连上但 30s 没收到 turn.end → timeout reject → 返回 false
-- WS 关闭但没收到 turn.end 且有 audio chunks → 仍 resolve（部分音频可用）
-- WS 关闭且没有 audio chunks → reject
+- WS 关闭且没收到 turn.end → reject（不论是否有 partial chunks）
+- 只有收到 turn.end 才 resolve
 
 ## speak() fallback 顺序
 1. ttsEngine === 'free' → 先试 speakEdge
@@ -57,7 +57,8 @@ speak(text)
 - 每个 speakEdge/speakBrowser 循环内检查 _cancel
 
 ## Worker fallback 状态
-Worker 的 /api/tts 端点仍存在于 worker/src/index.js，但当前没有任何前端代码调用它。不在主链路中。历史遗留，保留但不影响。
+Worker 的 /api/tts 端点已删除（fc31cf8）。前端 ttsAudio() 也已删除。
+Worker 不参与 TTS cascade。主链路只有：edge → browser。
 
 ## Review 重点（4 条）
 1. Provider 抽象 — speakEdge 和 speakBrowser 独立，不互相调用
