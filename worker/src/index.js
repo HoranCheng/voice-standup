@@ -115,34 +115,35 @@ export default {
         };
         if (system) requestBody.system = system;
 
-        // 60s timeout (Cloudflare Workers paid plan allows up to 30s CPU;
-        // but wall-clock time for subrequests is not limited the same way)
+        // 60s timeout for Claude API subrequest
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 60000);
 
-        const res = await fetch('https://api.anthropic.com/v1/messages', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-api-key': env.CLAUDE_API_KEY,
-            'anthropic-version': '2023-06-01',
-          },
-          body: JSON.stringify(requestBody),
-          signal: controller.signal,
-        });
+        try {
+          const res = await fetch('https://api.anthropic.com/v1/messages', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-api-key': env.CLAUDE_API_KEY,
+              'anthropic-version': '2023-06-01',
+            },
+            body: JSON.stringify(requestBody),
+            signal: controller.signal,
+          });
 
-        clearTimeout(timeoutId);
+          if (!res.ok) {
+            const err = await res.text();
+            console.error('Claude API error:', res.status, err);
+            console.error('Claude API request body:', JSON.stringify(requestBody));
+            return json({ error: `AI service error (${res.status})`, detail: err }, 502, env, origin);
+          }
 
-        if (!res.ok) {
-          const err = await res.text();
-          console.error('Claude API error:', res.status, err);
-          console.error('Claude API request body:', JSON.stringify(requestBody));
-          return json({ error: `AI service error (${res.status})`, detail: err }, 502, env, origin);
+          const data = await res.json();
+          const response = data.content?.[0]?.text || '';
+          return json({ response }, 200, env, origin);
+        } finally {
+          clearTimeout(timeoutId);
         }
-
-        const data = await res.json();
-        const response = data.content?.[0]?.text || '';
-        return json({ response }, 200, env, origin);
       }
 
       // ─── Standup CRUD ───────────────────────────────────────────────────
