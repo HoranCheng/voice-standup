@@ -10,6 +10,60 @@
 const MAX_MESSAGES = 50;
 const MAX_CONTENT_LEN = 8000;
 const PRODUCT_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+const TIMEZONE = 'Australia/Melbourne';
+
+/** Get today's date in AEST/AEDT (YYYY-MM-DD) */
+function todayAEST() {
+  return new Date().toLocaleDateString('en-CA', { timeZone: TIMEZONE });
+}
+const DISCORD_CHAR_LIMIT = 2000;
+
+
+/**
+ * Send a message to a Discord webhook.
+ * If content exceeds 2000 chars, splits into multiple messages.
+ */
+async function sendToWebhook(webhookUrl, content, options = {}) {
+  const { username = '早会助手', productId = '', prefix = '' } = options;
+  const fullContent = prefix ? `${prefix}\n\n${content}` : content;
+
+  if (fullContent.length <= DISCORD_CHAR_LIMIT) {
+    return fetch(webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: fullContent, username }),
+    });
+  }
+
+  // Long content: split into chunks and send sequentially
+  // Discord allows 2000 chars per message; we use 1900 to leave room for chunk headers
+  const CHUNK_SIZE = 1900;
+  const chunks = [];
+  for (let i = 0; i < fullContent.length; i += CHUNK_SIZE) {
+    chunks.push(fullContent.slice(i, i + CHUNK_SIZE));
+  }
+
+  let lastRes = null;
+  for (let i = 0; i < chunks.length; i++) {
+    const chunkHeader = chunks.length > 1 ? `**(${i + 1}/${chunks.length})**\n` : '';
+    const chunkContent = chunkHeader + chunks[i];
+
+    lastRes = await fetch(webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: chunkContent, username }),
+    });
+
+    if (!lastRes.ok) return lastRes;
+
+    // Small delay between messages to avoid rate limit
+    if (i < chunks.length - 1) {
+      await new Promise(r => setTimeout(r, 500));
+    }
+  }
+
+  return lastRes;
+}
 
 export default {
   async fetch(request, env) {
@@ -52,30 +106,45 @@ export default {
           ? String(body.system || env.SYSTEM_PROMPT || '').slice(0, MAX_CONTENT_LEN)
           : (env.SYSTEM_PROMPT || '');
 
-        const res = await fetch('https://api.anthropic.com/v1/messages', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-api-key': env.CLAUDE_API_KEY,
-            'anthropic-version': '2023-06-01',
-          },
-          body: JSON.stringify({
-            model: env.CLAUDE_MODEL || 'claude-sonnet-4-20250514',
+        // Build request body — omit system if empty (Claude API rejects empty string)
+        // Use env.CLAUDE_MODEL if set, otherwise default to haiku 4.5
+        const model = env.CLAUDE_MODEL || 'claude-haiku-4-5-20251001';
+        const requestBody = {
+            model,
             max_tokens: 4096,
-            system,
             messages: safeMessages,
-          }),
-        });
+        };
+        if (system) requestBody.system = system;
 
-        if (!res.ok) {
-          const err = await res.text();
-          console.error('Claude API error:', res.status, err);
-          return json({ error: `AI service error (${res.status})` }, 502, env, origin);
+        // 60s timeout for Claude API subrequest
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 60000);
+
+        try {
+          const res = await fetch('https://api.anthropic.com/v1/messages', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-api-key': env.CLAUDE_API_KEY,
+              'anthropic-version': '2023-06-01',
+            },
+            body: JSON.stringify(requestBody),
+            signal: controller.signal,
+          });
+
+          if (!res.ok) {
+            const err = await res.text();
+            console.error('Claude API error:', res.status, err);
+            console.error('Claude API request body:', JSON.stringify(requestBody));
+            return json({ error: `AI service error (${res.status})`, detail: err }, 502, env, origin);
+          }
+
+          const data = await res.json();
+          const response = data.content?.[0]?.text || '';
+          return json({ response }, 200, env, origin);
+        } finally {
+          clearTimeout(timeoutId);
         }
-
-        const data = await res.json();
-        const response = data.content?.[0]?.text || '';
-        return json({ response }, 200, env, origin);
       }
 
       // ─── Standup CRUD ───────────────────────────────────────────────────
@@ -86,7 +155,10 @@ export default {
           return json({ error: 'Invalid productId' }, 400, env, origin);
         }
 
-        const today = new Date().toISOString().slice(0, 10);
+        // Use AEST date to match Henry's local calendar day
+        // (UTC 19:10 = AEST 06:10 next day — without this fix, PUT at 6am AEST
+        //  would use yesterday's UTC date, causing GET later to miss it)
+        const today = todayAEST();
         const key = `${productId}:${today}`;
 
         if (request.method === 'GET') {
@@ -106,6 +178,36 @@ export default {
         }
       }
 
+      // ─── Publish to Command Channel ──────────────────────────────────────
+      if (path === '/api/publish-command' && request.method === 'POST') {
+        let body;
+        try { body = await request.json(); }
+        catch { return json({ error: 'Invalid JSON' }, 400, env, origin); }
+
+        const { productId, content } = body;
+        if (!productId || !PRODUCT_ID_RE.test(productId)) {
+          return json({ error: 'Invalid productId' }, 400, env, origin);
+        }
+
+        const webhookUrl = env.WEBHOOK_COMMAND;
+        if (!webhookUrl) {
+          return json({ error: 'Command webhook not configured' }, 400, env, origin);
+        }
+
+        const safeContent = String(content ?? '');
+        const discordRes = await sendToWebhook(webhookUrl, safeContent, {
+          productId,
+          prefix: `📋 **${productId} — 指导意见**`,
+        });
+
+        if (!discordRes.ok) {
+          console.error('Command webhook error:', discordRes.status);
+          return json({ error: `Command publish failed (${discordRes.status})` }, 502, env, origin);
+        }
+
+        return json({ ok: true }, 200, env, origin);
+      }
+
       // ─── Publish to Discord ─────────────────────────────────────────────
       if (path === '/api/publish' && request.method === 'POST') {
         let body;
@@ -122,15 +224,8 @@ export default {
           return json({ error: `No webhook configured for product: ${productId}` }, 400, env, origin);
         }
 
-        const safeContent = String(content ?? '').slice(0, 2000);
-        const discordRes = await fetch(webhookUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            content: safeContent,
-            username: '早会助手',
-          }),
-        });
+        const safeContent = String(content ?? '');
+        const discordRes = await sendToWebhook(webhookUrl, safeContent, { productId });
 
         if (!discordRes.ok) {
           console.error('Discord webhook error:', discordRes.status);
@@ -140,10 +235,49 @@ export default {
         return json({ ok: true }, 200, env, origin);
       }
 
+      // ─── TTS (Google Translate proxy, free) ──────────────────────────────
+      if (path === '/api/tts' && request.method === 'POST') {
+        let body;
+        try { body = await request.json(); }
+        catch { return json({ error: 'Invalid JSON' }, 400, env, origin); }
+
+        const text = String(body.text ?? '').slice(0, 5000);
+        if (!text) return json({ error: 'text required' }, 400, env, origin);
+
+        const lang = body.lang || 'zh-CN';
+
+        // Google Translate TTS — free, no key needed, 200 char limit per request
+        const encodedText = encodeURIComponent(text.slice(0, 200));
+        try {
+          const gttsRes = await fetch(
+            `https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=${lang}&q=${encodedText}`,
+            {
+              headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+              },
+            }
+          );
+          if (!gttsRes.ok) {
+            return json({ error: `Google TTS failed (${gttsRes.status})` }, 502, env, origin);
+          }
+          return new Response(gttsRes.body, {
+            status: 200,
+            headers: {
+              'Content-Type': 'audio/mpeg',
+              'Cache-Control': 'no-store',
+              ...corsHeaders(env, origin),
+            },
+          });
+        } catch (e) {
+          console.error('Google TTS error:', e.message);
+          return json({ error: `TTS failed: ${e.message}` }, 502, env, origin);
+        }
+      }
+
       return json({ error: 'Not found' }, 404, env, origin);
     } catch (e) {
-      console.error('Worker error:', e);
-      return json({ error: 'Internal error' }, 500, env, origin);
+      console.error('Worker error:', e.message, e.stack);
+      return json({ error: 'Internal error', detail: e.message }, 500, env, origin);
     }
   },
 };

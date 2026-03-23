@@ -24,6 +24,9 @@ export function createRecognizer(lang = 'zh-CN', { onResult, onEnd, onError }) {
   rec.maxAlternatives = 1;
 
   let finalTranscript = '';
+  let lastInterim = ''; // Track interim for fallback when stop() is called before isFinal
+  let settleTimer = null; // isFinal settle window
+  const SETTLE_MS = 1500; // Wait 1.5s after isFinal before confirming
 
   rec.onresult = (e) => {
     let interim = '';
@@ -31,17 +34,47 @@ export function createRecognizer(lang = 'zh-CN', { onResult, onEnd, onError }) {
       const t = e.results[i][0].transcript;
       if (e.results[i].isFinal) {
         finalTranscript += t;
-        onResult?.({ final: finalTranscript, interim: '', isFinal: true });
+        lastInterim = '';
+
+        // Cancel any pending settle timer (new final came in)
+        if (settleTimer) { clearTimeout(settleTimer); settleTimer = null; }
+
+        // Start settle window: wait 1.5s for more speech before confirming
+        settleTimer = setTimeout(() => {
+          settleTimer = null;
+          onResult?.({ final: finalTranscript, interim: '', isFinal: true });
+        }, SETTLE_MS);
+
+        // Immediately report as interim (so UI shows what user said)
+        onResult?.({ final: finalTranscript, interim: '', isFinal: false });
       } else {
         interim += t;
+        lastInterim = interim;
+
+        // If we have a pending settle timer, cancel it (user still speaking)
+        if (settleTimer) { clearTimeout(settleTimer); settleTimer = null; }
+
         onResult?.({ final: finalTranscript, interim, isFinal: false });
       }
     }
   };
 
   rec.onerror = (e) => {
-    if (e.error === 'no-speech' || e.error === 'aborted') return;
-    onError?.(e.error);
+    if (e.error === 'aborted') return;
+
+    // Classify STT errors for user-friendly messages (especially driving mode)
+    const errorMessages = {
+      'no-speech': null, // silent — normal in driving mode pauses
+      'audio-capture': '无法访问麦克风，请检查权限设置',
+      'not-allowed': '麦克风权限被拒绝，请在设置中允许',
+      'network': '网络连接异常，语音识别暂时不可用',
+      'service-not-allowed': '语音识别服务不可用',
+      'language-not-supported': '当前语言不支持语音识别',
+    };
+
+    const msg = errorMessages[e.error];
+    if (msg === null) return; // explicitly silenced
+    onError?.(msg || `语音识别错误: ${e.error}`, e.error);
   };
 
   rec.onend = () => {
@@ -49,10 +82,26 @@ export function createRecognizer(lang = 'zh-CN', { onResult, onEnd, onError }) {
   };
 
   return {
-    start() { finalTranscript = ''; rec.start(); },
-    stop() { rec.stop(); },
-    abort() { rec.abort(); },
-    getTranscript() { return finalTranscript; },
-    resetTranscript() { finalTranscript = ''; },
+    start() { finalTranscript = ''; lastInterim = ''; if (settleTimer) { clearTimeout(settleTimer); settleTimer = null; } rec.start(); },
+    stop() { if (settleTimer) { clearTimeout(settleTimer); settleTimer = null; } rec.stop(); },
+    abort() { if (settleTimer) { clearTimeout(settleTimer); settleTimer = null; } rec.abort(); },
+    getTranscript() { return finalTranscript || lastInterim; }, // fallback to interim if final not yet fired
+    resetTranscript() { finalTranscript = ''; lastInterim = ''; },
+    /** Stop and wait for final transcript (resolves after onend fires) */
+    stopAndWait(timeoutMs = 2000) {
+      return new Promise((resolve) => {
+        const timer = setTimeout(() => {
+          resolve(finalTranscript?.trim() || '');
+        }, timeoutMs);
+
+        const prevOnEnd = rec.onend;
+        rec.onend = () => {
+          clearTimeout(timer);
+          prevOnEnd?.();
+          resolve(finalTranscript?.trim() || '');
+        };
+        rec.stop();
+      });
+    },
   };
 }

@@ -1,8 +1,61 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, Component } from 'react';
 import { loadConfig, saveConfig } from './config';
 import { isSTTSupported, createRecognizer } from './stt';
 import { speak, stopSpeaking, unlockAudio } from './tts';
-import { chat, getStandup, publishDirective } from './api';
+import { chat, getStandup, publishDirective, publishToCommand } from './api';
+
+// ─── Error Boundary ──────────────────────────────────────────────────────────
+class ErrorBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+  componentDidCatch(error, info) {
+    console.error('App crashed:', error, info);
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{
+          minHeight: '100dvh', background: '#0a0a0f', color: '#e4e4e7',
+          fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif',
+          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+          padding: '40px 24px', gap: 16, textAlign: 'center',
+        }}>
+          <div style={{ fontSize: 48 }}>⚠️</div>
+          <div style={{ fontSize: 20, fontWeight: 800 }}>应用出错了</div>
+          <div style={{ fontSize: 14, color: '#a1a1aa', maxWidth: 300, lineHeight: 1.6 }}>
+            {this.state.error?.message || '发生了未知错误'}
+          </div>
+          <button
+            onClick={() => { this.setState({ hasError: false, error: null }); }}
+            style={{
+              marginTop: 8, padding: '12px 32px', borderRadius: 12, border: 'none',
+              background: '#6366f1', color: '#fff', fontSize: 15, fontWeight: 700,
+              cursor: 'pointer', fontFamily: 'inherit',
+            }}
+          >
+            重试
+          </button>
+          <button
+            onClick={() => { window.location.reload(); }}
+            style={{
+              padding: '10px 24px', borderRadius: 10, border: '1px solid #3f3f46',
+              background: 'transparent', color: '#71717a', fontSize: 13,
+              cursor: 'pointer', fontFamily: 'inherit',
+            }}
+          >
+            刷新页面
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 // ─── Theme ───────────────────────────────────────────────────────────────────
 const T = {
@@ -17,16 +70,18 @@ const F = '-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif'
 const SYSTEM_PROMPT = `你是产品负责人的早会助手。
 
 你的职责：
-1. 简洁地向负责人汇报早报要点
-2. 回答他关于进展的问题
-3. 当他给出指导意见时，确认并记录
-4. 当他说"结束会议"时，整理出结构化的指导意见文稿
+1. 如果有今日简报，第一轮回复时必须主动朗读简报要点（逐条念出关键信息，不要只说"有更新"）
+2. 简洁地向负责人汇报早报要点
+3. 回答他关于进展的问题
+4. 当他给出指导意见时，确认并记录
+5. 当他说"结束会议"时，整理出结构化的指导意见文稿
 
 沟通风格：
 - 简洁直接，不废话
 - 用中文
 - 像一个高效的技术总监在开站会
 - 需要他做决定的地方主动提出来
+- 朗读简报时按优先级排列，先说最重要的
 
 当用户说"结束会议"或类似表达时，输出以下格式的整理稿：
 """
@@ -39,11 +94,21 @@ const SYSTEM_PROMPT = `你是产品负责人的早会助手。
 """`;
 
 // ─── Main App ────────────────────────────────────────────────────────────────
-export default function App() {
+function AppInner() {
   // Detect Siri/autostart mode from URL param: ?autostart=1
   const autostartMode = new URLSearchParams(window.location.search).get('autostart') === '1';
 
-  const [view, setView] = useState(autostartMode ? 'taptostart' : 'home');
+  // Clear ?autostart=1 from URL to prevent re-trigger on refresh
+  useEffect(() => {
+    if (autostartMode) {
+      const url = new URL(window.location);
+      url.searchParams.delete('autostart');
+      window.history.replaceState({}, '', url.pathname + url.search);
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Default to driving mode (taptostart) always
+  const [view, setView] = useState('taptostart');
   const [config, setConfig] = useState(loadConfig);
   const [products, setProducts] = useState(() => config.products || []);
   const [selectedProduct, setSelectedProduct] = useState(null);
@@ -54,6 +119,7 @@ export default function App() {
   const [interim, setInterim] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const loadingRef = useRef(false);
   const [elapsed, setElapsed] = useState(0);
   const [summary, setSummary] = useState('');
   const [publishing, setPublishing] = useState(false);
@@ -68,14 +134,19 @@ export default function App() {
   const wakeLockRef = useRef(null);
   const standupRef = useRef(null);
 
-  // Driving mode: continuous auto-listen + auto-send (no push-to-talk)
+  // Driving mode: useState for re-render + ref for stable closure access
+  const [drivingMode, setDrivingMode] = useState(false);
   const drivingModeRef = useRef(false);
   // Stable ref for handleUserMessage to avoid circular deps in startListening
   const handleUserMessageRef = useRef(null);
+  // Retry backoff counter for driving mode error recovery
+  const retryCountRef = useRef(0);
+  const MAX_RETRIES = 5;
 
   // Keep refs in sync
   useEffect(() => { messagesRef.current = messages; }, [messages]);
   useEffect(() => { standupRef.current = standup; }, [standup]);
+  useEffect(() => { drivingModeRef.current = drivingMode; }, [drivingMode]);
 
   // Auto-scroll
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
@@ -145,6 +216,8 @@ export default function App() {
   // ─── Send user message → AI → TTS ──────────────────────────────────────
   const handleUserMessage = useCallback(async (text) => {
     if (!text) return;
+    // Guard: prevent duplicate sends while already processing
+    if (loadingRef.current) return;
 
     const userMsg = { role: 'user', content: text };
     const updated = [...messagesRef.current, userMsg];
@@ -154,7 +227,7 @@ export default function App() {
     const endTriggers = ['结束会议', '结束', '就这样', '好了', '结束吧'];
     const isEnd = endTriggers.some(t => text.includes(t));
 
-    setLoading(true);
+    setLoading(true); loadingRef.current = true;
     try {
       const chatMessages = updated
         .filter(m => !m.hidden)
@@ -181,7 +254,7 @@ export default function App() {
         clearInterval(timerRef.current);
         wakeLockRef.current?.release();
         wakeLockRef.current = null;
-        drivingModeRef.current = false;
+        setDrivingMode(false);
       }
 
       // Speak response
@@ -191,16 +264,31 @@ export default function App() {
 
       // Driving mode: auto-restart listening after AI finishes speaking
       if (drivingModeRef.current && !isEnd) {
+        retryCountRef.current = 0; // reset on success
         startListening();
       }
     } catch (e) {
       setError(e.message);
-      // Driving mode: retry listening even after error
+      // Driving mode: retry with exponential backoff + max retries
       if (drivingModeRef.current) {
-        startListening();
+        retryCountRef.current++;
+        if (retryCountRef.current <= MAX_RETRIES) {
+          const delay = Math.min(1000 * Math.pow(2, retryCountRef.current - 1), 16000);
+          // Speak error hint in driving mode
+          if (retryCountRef.current === 1) {
+            speak('网络异常，稍后重试', config.lang);
+          }
+          setTimeout(() => {
+            if (drivingModeRef.current) startListening();
+          }, delay);
+        } else {
+          // Give up after max retries
+          speak('多次重试失败，请检查网络后手动重新开始', config.lang);
+          setDrivingMode(false);
+        }
       }
     } finally {
-      setLoading(false);
+      setLoading(false); loadingRef.current = false;
     }
   }, [config.lang, startListening]);
 
@@ -215,7 +303,8 @@ export default function App() {
     // Unlock iOS audio SYNCHRONOUSLY inside this gesture handler
     unlockAudio();
 
-    drivingModeRef.current = driving;
+    setDrivingMode(driving);
+    retryCountRef.current = 0;
     setSelectedProduct(product);
     setMessages([]);
     setElapsed(0);
@@ -240,19 +329,44 @@ export default function App() {
     }
     setStandup(standupText);
 
-    // AI greeting
-    const greeting = standupText
-      ? `早上好。今天${product.name}有更新，我来给你简单说一下要点。`
-      : `早上好。今天${product.name}暂时没有新的早报，有什么想讨论的？`;
+    // AI greeting — if standup exists, use AI to read the briefing naturally
+    if (standupText) {
+      // Let AI generate a proper briefing readout via chat
+      const systemWithStandup = SYSTEM_PROMPT + `\n\n[今日简报]\n${standupText}`;
+      setMessages([{ role: 'assistant', content: '正在读取今日简报...' }]);
 
-    setMessages([
-      { role: 'assistant', content: greeting },
-    ]);
+      try {
+        setLoading(true); loadingRef.current = true;
+        const briefingReadout = await chat(
+          [{ role: 'user', content: `早上好，请给我读一下今天${product.name}的简报要点。` }],
+          systemWithStandup
+        );
+        setMessages([
+          { role: 'user', content: `开始${product.name}早会`, hidden: true },
+          { role: 'assistant', content: briefingReadout },
+        ]);
+        setLoading(false); loadingRef.current = false;
 
-    // Speak greeting, then auto-start listening in driving mode
-    setSpeaking(true);
-    await speak(greeting, config.lang);
-    setSpeaking(false);
+        setSpeaking(true);
+        await speak(briefingReadout, config.lang);
+        setSpeaking(false);
+      } catch (e) {
+        // Fallback to static greeting if AI fails
+        const fallback = `早上好。今天${product.name}有简报，但读取失败了。有什么想讨论的？`;
+        setMessages([{ role: 'assistant', content: fallback }]);
+        setLoading(false); loadingRef.current = false;
+        setSpeaking(true);
+        await speak(fallback, config.lang);
+        setSpeaking(false);
+      }
+    } else {
+      const greeting = `早上好。今天${product.name}暂时没有新的早报，有什么想讨论的？`;
+      setMessages([{ role: 'assistant', content: greeting }]);
+
+      setSpeaking(true);
+      await speak(greeting, config.lang);
+      setSpeaking(false);
+    }
 
     if (driving) {
       startListening();
@@ -273,9 +387,9 @@ export default function App() {
   }, [stopListening, handleUserMessage]);
 
   // ─── End meeting manually ───────────────────────────────────────────────
-  const endMeeting = useCallback(() => {
-    drivingModeRef.current = false;
-    const transcript = stopListening();
+  const endMeeting = useCallback(async () => {
+    setDrivingMode(false);
+    const transcript = await stopListening();
     stopSpeaking();
     handleUserMessage(transcript ? transcript + ' 结束会议' : '结束会议，请整理指导意见。');
   }, [stopListening, handleUserMessage]);
@@ -285,7 +399,10 @@ export default function App() {
     if (!selectedProduct || !summary) return;
     setPublishing(true);
     try {
+      // Dual publish: product channel + command channel
       await publishDirective(selectedProduct.id, summary);
+      // Command channel publish (best-effort, don't block on failure)
+      publishToCommand(selectedProduct.id, summary);
       setPublished(true);
     } catch (e) {
       setError(e.message);
@@ -429,15 +546,47 @@ export default function App() {
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <span style={{ width: 8, height: 8, borderRadius: '50%', background: T.red, animation: 'pulse 1.5s infinite' }} />
               <span style={{ fontSize: 13, fontWeight: 700 }}>早会进行中</span>
-              {drivingModeRef.current && (
-                <span style={{
-                  fontSize: 10, padding: '2px 8px', borderRadius: 6,
-                  background: 'rgba(245,158,11,0.2)', color: T.amber,
-                }}>🚗 驾车</span>
-              )}
+              <span
+                onClick={() => {
+                  if (drivingMode) {
+                    // Switch to manual: stop auto-listening
+                    setDrivingMode(false);
+                    listeningRef.current = false;
+                    setListening(false);
+                    recRef.current?.stop();
+                  } else {
+                    // Switch to driving: start auto-listening
+                    setDrivingMode(true);
+                    startListening();
+                  }
+                }}
+                style={{
+                  fontSize: 10, padding: '2px 8px', borderRadius: 6, cursor: 'pointer',
+                  background: drivingMode ? 'rgba(245,158,11,0.2)' : 'rgba(99,102,241,0.15)',
+                  color: drivingMode ? T.amber : T.acc,
+                }}
+              >{drivingMode ? '🚗 驾车' : '👆 手动'}</span>
             </div>
             <span style={{ fontSize: 13, color: T.tx3, fontFamily: 'monospace' }}>{formatTime(elapsed)}</span>
           </div>
+
+          {/* Full-screen tap-to-skip overlay (driving mode + AI speaking) */}
+          {drivingMode && speaking_ && (
+            <div
+              onClick={() => { stopSpeaking(); }}
+              style={{
+                position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+                zIndex: 50, display: 'flex', flexDirection: 'column',
+                alignItems: 'center', justifyContent: 'center',
+                background: 'rgba(0,0,0,0.3)',
+                WebkitTapHighlightColor: 'transparent',
+                cursor: 'pointer',
+              }}
+            >
+              <div style={{ fontSize: 64, marginBottom: 16 }}>🔊</div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: '#fff' }}>点击任意位置跳过</div>
+            </div>
+          )}
 
           {/* Messages */}
           <div style={{ flex: 1, overflowY: 'auto', padding: '12px 0' }}>
@@ -470,12 +619,34 @@ export default function App() {
             <div ref={chatEndRef} />
           </div>
 
+          {/* Full-screen skip overlay (driving mode + AI speaking) */}
+          {drivingMode && speaking_ && (
+            <div
+              onClick={() => stopSpeaking()}
+              style={{
+                position: 'fixed', inset: 0, zIndex: 100,
+                display: 'flex', alignItems: 'flex-end', justifyContent: 'center',
+                paddingBottom: 120, // above the controls
+                background: 'rgba(0,0,0,0.15)',
+                cursor: 'pointer',
+              }}
+            >
+              <div style={{
+                padding: '16px 32px', borderRadius: 20,
+                background: 'rgba(0,0,0,0.6)', color: '#fff',
+                fontSize: 18, fontWeight: 700,
+              }}>
+                点击任意位置跳过 ⏭
+              </div>
+            </div>
+          )}
+
           {/* Controls */}
           <div style={{
             display: 'flex', gap: 12, padding: '16px 0',
             borderTop: `1px solid ${T.bdr}`, justifyContent: 'center', alignItems: 'center',
           }}>
-            {drivingModeRef.current ? (
+            {drivingMode ? (
               // ── Driving mode: status indicator + end button only ──
               <>
                 <div style={{
@@ -494,6 +665,7 @@ export default function App() {
                   padding: '0 24px', height: 64, borderRadius: 20,
                   border: `1px solid ${T.bdr}`, background: T.card,
                   color: T.tx, fontSize: 14, fontWeight: 700, cursor: 'pointer', fontFamily: F,
+                  position: 'relative', zIndex: 200,
                 }}>
                   ⏹ 结束
                 </button>
@@ -531,7 +703,7 @@ export default function App() {
             )}
           </div>
 
-          {!drivingModeRef.current && (
+          {!drivingMode && (
             <div style={{ textAlign: 'center', paddingBottom: 8, fontSize: 11, color: T.tx3 }}>
               {listening ? '正在听…松手发送' : loading ? 'AI 思考中' : '按住说话'}
             </div>
@@ -660,5 +832,14 @@ function Settings({ config, onSave, onBack }) {
         </div>
       </div>
     </div>
+  );
+}
+
+// ─── Export with Error Boundary ──────────────────────────────────────────────
+export default function App() {
+  return (
+    <ErrorBoundary>
+      <AppInner />
+    </ErrorBoundary>
   );
 }

@@ -26,6 +26,20 @@ for key in "${required[@]}"; do
   fi
 done
 
+# Detect placeholder values that haven't been replaced
+placeholders=("replace-with-" "your-" "sk-ant-...")
+for key in AUTH_TOKEN CLAUDE_API_KEY KV_NAMESPACE_ID; do
+  val="${!key:-}"
+  for ph in "${placeholders[@]}"; do
+    if [[ "$val" == *"$ph"* ]]; then
+      echo "ERROR: $key still contains placeholder value."
+      echo "  Current: $val"
+      echo "  Edit .env.local and replace with the real value."
+      exit 1
+    fi
+  done
+done
+
 if ! command -v wrangler >/dev/null 2>&1; then
   echo "wrangler not found. Run: npm install"
   exit 1
