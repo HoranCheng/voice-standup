@@ -235,8 +235,44 @@ export default {
         return json({ ok: true }, 200, env, origin);
       }
 
-      // TTS endpoint removed — Edge TTS runs client-side (edgeTTS.js),
-      // browser SpeechSynthesis is the fallback. No Worker TTS in the cascade.
+      // ─── TTS (Google Translate proxy, free) ──────────────────────────────
+      if (path === '/api/tts' && request.method === 'POST') {
+        let body;
+        try { body = await request.json(); }
+        catch { return json({ error: 'Invalid JSON' }, 400, env, origin); }
+
+        const text = String(body.text ?? '').slice(0, 5000);
+        if (!text) return json({ error: 'text required' }, 400, env, origin);
+
+        const lang = body.lang || 'zh-CN';
+
+        // Google Translate TTS — free, no key needed, 200 char limit per request
+        const encodedText = encodeURIComponent(text.slice(0, 200));
+        try {
+          const gttsRes = await fetch(
+            `https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=${lang}&q=${encodedText}`,
+            {
+              headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+              },
+            }
+          );
+          if (!gttsRes.ok) {
+            return json({ error: `Google TTS failed (${gttsRes.status})` }, 502, env, origin);
+          }
+          return new Response(gttsRes.body, {
+            status: 200,
+            headers: {
+              'Content-Type': 'audio/mpeg',
+              'Cache-Control': 'no-store',
+              ...corsHeaders(env, origin),
+            },
+          });
+        } catch (e) {
+          console.error('Google TTS error:', e.message);
+          return json({ error: `TTS failed: ${e.message}` }, 502, env, origin);
+        }
+      }
 
       return json({ error: 'Not found' }, 404, env, origin);
     } catch (e) {
