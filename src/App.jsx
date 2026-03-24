@@ -139,6 +139,9 @@ function AppInner() {
   const drivingModeRef = useRef(false);
   // Stable ref for handleUserMessage to avoid circular deps in startListening
   const handleUserMessageRef = useRef(null);
+  // Counter for consecutive empty/too-short transcripts in driving mode
+  const emptyTranscriptCountRef = useRef(0);
+  const MAX_EMPTY_TRANSCRIPTS = 3;
   // Retry backoff counter for driving mode error recovery
   const retryCountRef = useRef(0);
   const MAX_RETRIES = 5;
@@ -176,11 +179,28 @@ function AppInner() {
         setInterim(isFinal ? '' : i);
 
         // Driving mode: auto-send when speech finalises — no button needed
-        if (isFinal && f.trim() && drivingModeRef.current) {
+        if (isFinal && drivingModeRef.current) {
+          const transcript = f.trim();
+          // Guard: skip empty or too-short transcripts (likely TTS echo or noise)
+          if (!transcript || transcript.length < 2) {
+            emptyTranscriptCountRef.current++;
+            if (emptyTranscriptCountRef.current >= MAX_EMPTY_TRANSCRIPTS) {
+              // Too many empty transcripts — stop listening, show hint
+              listeningRef.current = false;
+              setListening(false);
+              setInterim('');
+              setError('未检测到语音输入，请点击麦克风重新开始');
+              emptyTranscriptCountRef.current = 0;
+            }
+            // Otherwise just ignore and keep listening
+            return;
+          }
+          // Valid transcript — reset counter and send
+          emptyTranscriptCountRef.current = 0;
           listeningRef.current = false;
           setListening(false);
           setInterim('');
-          handleUserMessageRef.current?.(f.trim());
+          handleUserMessageRef.current?.(transcript);
         }
       },
       onEnd: () => {
@@ -255,6 +275,13 @@ function AppInner() {
         wakeLockRef.current?.release();
         wakeLockRef.current = null;
         setDrivingMode(false);
+      }
+
+      // TTS/STT mutual exclusion: stop listening before speaking
+      if (listeningRef.current) {
+        listeningRef.current = false;
+        setListening(false);
+        recRef.current?.stop();
       }
 
       // Speak response

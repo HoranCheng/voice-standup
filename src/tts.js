@@ -23,7 +23,9 @@ export function stopSpeaking() {
   window.speechSynthesis?.cancel();
   if (_currentAudio) {
     _currentAudio.pause();
-    _currentAudio.src = '';
+    // Don't destroy persistent element, just clear its source
+    _currentAudio.removeAttribute('src');
+    _currentAudio.load(); // reset audio state
     _currentAudio = null;
   }
   _speaking = false;
@@ -40,13 +42,30 @@ export function unlockAudio() {
     utt.volume = 0;
     window.speechSynthesis.speak(utt);
   }
-  // Also unlock <audio> playback context
+  // Unlock <audio> playback context using persistent element
+  // This helps iOS route audio to bluetooth/external speakers
   try {
-    const a = new Audio();
+    const a = getPersistentAudio();
     a.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
     a.volume = 0;
     a.play().catch(() => {});
   } catch {}
+}
+
+// ─── Persistent audio element (better bluetooth/external speaker routing) ────
+// Reusing a single <audio> element avoids iOS audio session issues that can
+// lock output to the phone speaker instead of bluetooth.
+let _persistentAudio = null;
+
+function getPersistentAudio() {
+  if (!_persistentAudio) {
+    _persistentAudio = new Audio();
+    _persistentAudio.setAttribute('playsinline', '');
+    // Attach to DOM to help iOS route audio correctly
+    _persistentAudio.style.display = 'none';
+    document.body?.appendChild(_persistentAudio);
+  }
+  return _persistentAudio;
 }
 
 // ─── Audio segment player ────────────────────────────────────────────────────
@@ -54,7 +73,8 @@ export function unlockAudio() {
 function playAudioBlob(blob) {
   if (_cancel) return Promise.resolve(false);
   const audioUrl = URL.createObjectURL(blob);
-  const audio = new Audio(audioUrl);
+  const audio = getPersistentAudio();
+  audio.src = audioUrl;
   _currentAudio = audio;
 
   return new Promise((resolve) => {
